@@ -1,0 +1,17 @@
+# Override file to enable Keycloak SSO authentication.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up --build
+#
+# This switches from dev auth (no login screen) to Keycloak SSO (login required).
+# After startup, open http://localhost:3000 and you will be redirected to Keycloak.
+# Log in with any of the seeded users (see README.md for credentials).
+
+services:
+  hris-core-api:
+    environment:
+      AUTH_MODE: keycloak
+      USE_STUB_DATA: "true"
+
+  portal:
+    build:
+      args:
+        VITE_AUTH_MODE: keycloak

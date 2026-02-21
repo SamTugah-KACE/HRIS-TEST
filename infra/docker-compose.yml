@@ -1,0 +1,121 @@
+version: "3.9"
+
+services:
+  postgres-tenant-registry:
+    image: postgres:15
+    container_name: postgres-tenant-registry
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hris_tenant_registry
+      POSTGRES_USER: hris_tenant_registry
+      POSTGRES_PASSWORD: ${TENANT_REGISTRY_DB_PASSWORD}
+    volumes:
+      - tenant_registry_db_data:/var/lib/postgresql/data
+      - ./db-init/tenant_registry_dev_seed.sql:/docker-entrypoint-initdb.d/tenant_registry_dev_seed.sql:ro
+    networks:
+      - hris_net
+
+  tenant-registry-service:
+    build:
+      context: ../tenant-registry-service
+      dockerfile: Dockerfile
+    container_name: tenant-registry-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://hris_tenant_registry:${TENANT_REGISTRY_DB_PASSWORD}@postgres-tenant-registry:5432/hris_tenant_registry
+      INTERNAL_BASIC_AUTH_USERNAME: ${TENANT_REGISTRY_BASIC_AUTH_USERNAME}
+      INTERNAL_BASIC_AUTH_PASSWORD: ${TENANT_REGISTRY_BASIC_AUTH_PASSWORD}
+    depends_on:
+      - postgres-tenant-registry
+    networks:
+      - hris_net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: >
+      start --optimized
+      --http-port=8080
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL_HOST: ${KEYCLOAK_DB_HOST}
+      KC_DB_URL_DATABASE: ${KEYCLOAK_DB_NAME}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_PROXY: edge
+      KC_HOSTNAME: ${KEYCLOAK_EXTERNAL_HOSTNAME}
+    networks:
+      - hris_net
+
+  hris-core-api:
+    build:
+      context: ../hris-core-api
+      dockerfile: Dockerfile
+    container_name: hris-core-api
+    restart: unless-stopped
+    environment:
+      # Keycloak
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL}
+      KEYCLOAK_AUDIENCE_HRIS_CORE: ${KEYCLOAK_AUDIENCE_HRIS_CORE}
+
+      # Tenant Registry
+      TENANT_REGISTRY_BASE_URL: http://tenant-registry-service:8000
+      TENANT_REGISTRY_TIMEOUT_SECONDS: 5
+      TENANT_REGISTRY_BASIC_AUTH_USERNAME: ${TENANT_REGISTRY_BASIC_AUTH_USERNAME}
+      TENANT_REGISTRY_BASIC_AUTH_PASSWORD: ${TENANT_REGISTRY_BASIC_AUTH_PASSWORD}
+
+      # External module hosts (prod/stage URLs)
+      SRMS_BASE_URL: ${SRMS_BASE_URL}                          # e.g. https://srms.gi-kace.com.gh
+      EAPPRAISAL_DOMAIN_TEMPLATE: ${EAPPRAISAL_DOMAIN_TEMPLATE}# e.g. https://appraisal.{subdomain}.com.gh
+      ELEAVE_DOMAIN_TEMPLATE: ${ELEAVE_DOMAIN_TEMPLATE}        # e.g. https://{subdomain}.eleave.com.gh
+
+      HTTP_CLIENT_TIMEOUT_SECONDS: 5
+    depends_on:
+      - tenant-registry-service
+      - keycloak
+    networks:
+      - hris_net
+
+  portal:
+    build:
+      context: ../portal
+      dockerfile: Dockerfile
+    container_name: hris-portal
+    restart: unless-stopped
+    environment:
+      # The portal itself will use these to talk to hris-core-api and keycloak
+      REACT_APP_HRIS_CORE_API_BASE_URL: ${HRIS_CORE_API_PUBLIC_BASE_URL}
+      REACT_APP_KEYCLOAK_URL: ${KEYCLOAK_PUBLIC_BASE_URL}
+      REACT_APP_KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      REACT_APP_KEYCLOAK_CLIENT_ID: ${KEYCLOAK_PORTAL_CLIENT_ID}
+    networks:
+      - hris_net
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: hris-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/hris-portal.conf:/etc/nginx/conf.d/hris-portal.conf:ro
+      - ./nginx/hris-core-api.conf:/etc/nginx/conf.d/hris-core-api.conf:ro
+      - ./nginx/keycloak.conf:/etc/nginx/conf.d/keycloak.conf:ro
+    ports:
+      - "80:80"
+      # In production you would terminate TLS (443) either here or in front of this reverse proxy
+    depends_on:
+      - portal
+      - hris-core-api
+      - keycloak
+    networks:
+      - hris_net
+
+networks:
+  hris_net:
+    driver: bridge
+
+volumes:
+  tenant_registry_db_data:

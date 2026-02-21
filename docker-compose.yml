@@ -1,0 +1,126 @@
+services:
+  # ──────────────── Database ────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: hris-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hris
+      POSTGRES_PASSWORD: hris_secret
+      POSTGRES_DB: hris_tenant_registry
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/db-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hris"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - hris
+
+  # ──────────────── Identity Provider ────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: hris-keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/hris_tenant_registry
+      KC_DB_USERNAME: hris
+      KC_DB_PASSWORD: hris_secret
+      KC_DB_SCHEMA: keycloak
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_PORT: 8080
+    volumes:
+      - ./identity:/opt/keycloak/data/import:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200\\|UP' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - hris
+
+  # ──────────────── Tenant Registry ────────────────
+  tenant-registry:
+    build:
+      context: ./tenant-registry-service
+      dockerfile: Dockerfile
+    container_name: hris-tenant-registry
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://hris:hris_secret@postgres:5432/hris_tenant_registry
+      INTERNAL_BASIC_AUTH_USERNAME: hris_internal
+      INTERNAL_BASIC_AUTH_PASSWORD: registry_secret
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - hris
+
+  # ──────────────── HRIS Core API ────────────────
+  hris-core-api:
+    build:
+      context: ./hris-core-api
+      dockerfile: Dockerfile
+    container_name: hris-core-api
+    restart: unless-stopped
+    environment:
+      AUTH_MODE: dev
+      USE_STUB_DATA: "true"
+      DEV_DEFAULT_TENANT_ID: "11111111-1111-1111-1111-111111111111"
+      DEV_DEFAULT_USERNAME: dev.admin
+      DEV_DEFAULT_ROLES: "hris:hr_manager"
+      TENANT_REGISTRY_BASE_URL: http://tenant-registry:8000
+      TENANT_REGISTRY_BASIC_AUTH_USERNAME: hris_internal
+      TENANT_REGISTRY_BASIC_AUTH_PASSWORD: registry_secret
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/hris-platform
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/hris-platform/protocol/openid-connect/certs
+      KEYCLOAK_AUDIENCE_HRIS_CORE: hris-core-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - tenant-registry
+    networks:
+      - hris
+
+  # ──────────────── Portal (React) ────────────────
+  portal:
+    build:
+      context: ./portal
+      dockerfile: Dockerfile
+      args:
+        VITE_HRIS_CORE_API_BASE_URL: http://localhost:8000
+        VITE_AUTH_MODE: dev
+        VITE_KEYCLOAK_URL: http://localhost:8080
+        VITE_KEYCLOAK_REALM: hris-platform
+        VITE_KEYCLOAK_CLIENT_ID: hris-portal
+    container_name: hris-portal
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - hris-core-api
+    networks:
+      - hris
+
+networks:
+  hris:
+    driver: bridge
+
+volumes:
+  pgdata:
