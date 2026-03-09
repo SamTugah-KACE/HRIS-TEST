@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
@@ -7,6 +7,7 @@ from jose import jwt, JWTError
 from pydantic import BaseModel
 
 from app.core.settings import get_settings
+from app.services import automation_store
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -26,7 +27,9 @@ class AuthenticatedUser(BaseModel):
     tenant_id: str
     roles: List[str] = []
     effective_role: str = "hris:employee"
+    employee_id: Optional[str] = None
     raw_token: Optional[str] = None
+    token_claims: Dict[str, object] = {}
 
 
 def resolve_effective_role(roles: List[str]) -> str:
@@ -49,7 +52,7 @@ def require_roles(*allowed_roles: str):
 
 def _decode_keycloak_token(token: str) -> dict:
     settings = get_settings()
-    if not settings.keycloak_jwks_url or not settings.keycloak_issuer or not settings.keycloak_audience:
+    if not settings.keycloak_jwks_url or not settings.keycloak_issuer:
         raise RuntimeError("Keycloak is not configured but auth_mode=keycloak")
 
     try:
@@ -59,15 +62,52 @@ def _decode_keycloak_token(token: str) -> dict:
         raise RuntimeError(f"Unable to fetch JWKS from Keycloak: {exc}") from exc
 
     jwks = response.json()
+    keys = jwks.get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(keys, list) or len(keys) == 0:
+        raise RuntimeError("JWKS payload does not contain signing keys")
+
+    unverified_header = jwt.get_unverified_header(token)
+    token_kid = unverified_header.get("kid")
+    if not token_kid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token header missing key identifier (kid)",
+        )
+
+    signing_key = next((key for key in keys if key.get("kid") == token_kid), None)
+    if signing_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token signing key was not found in JWKS",
+        )
+    configured_audiences = [
+        audience.strip()
+        for audience in str(settings.keycloak_audience or "").split(",")
+        if audience.strip()
+    ]
+    jwt_options = {"verify_iss": True, "verify_aud": False}
     try:
         payload = jwt.decode(
             token,
-            jwks,
+            signing_key,
             algorithms=["RS256"],
-            audience=settings.keycloak_audience,
+            audience=None,
             issuer=str(settings.keycloak_issuer),
-            options={"verify_aud": True, "verify_iss": True},
+            options=jwt_options,
         )
+        if configured_audiences:
+            token_aud = payload.get("aud")
+            if isinstance(token_aud, str):
+                token_audiences = {token_aud}
+            elif isinstance(token_aud, list):
+                token_audiences = {str(aud) for aud in token_aud}
+            else:
+                token_audiences = set()
+            if not any(aud in token_audiences for aud in configured_audiences):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token audience",
+                )
         return payload
     except JWTError as exc:
         raise HTTPException(
@@ -80,6 +120,7 @@ async def _get_user_dev(request: Request) -> AuthenticatedUser:
     settings = get_settings()
     tenant_id = request.headers.get("X-Debug-Tenant-Id") or settings.dev_default_tenant_id
     username = request.headers.get("X-Debug-Username") or settings.dev_default_username
+    employee_id = request.headers.get("X-Debug-Employee-Id") or settings.dev_default_employee_id
     roles_header = request.headers.get("X-Debug-Roles")
 
     if roles_header:
@@ -100,26 +141,59 @@ async def _get_user_dev(request: Request) -> AuthenticatedUser:
         tenant_id=str(tenant_id),
         roles=roles,
         effective_role=resolve_effective_role(roles),
+        employee_id=employee_id,
         raw_token=None,
+        token_claims={},
     )
 
 
 async def _get_user_keycloak(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> AuthenticatedUser:
-    if credentials is None:
+    token: Optional[str] = None
+    if credentials is not None:
+        token = credentials.credentials
+    else:
+        token = request.cookies.get("hris_access_token")
+
+    if token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
+            detail="Missing authentication token",
         )
 
-    token = credentials.credentials
     payload = _decode_keycloak_token(token)
 
     tenant_id = payload.get("tenant_id")
     preferred_username = payload.get("preferred_username") or payload.get("email")
     email = payload.get("email")
+    employee_id = payload.get("employee_id")
     roles = payload.get("roles") or payload.get("realm_access", {}).get("roles", [])
+
+    if tenant_id is None:
+        default_tenant_id = str(get_settings().dev_default_tenant_id or "").strip() or None
+        resolved = automation_store.resolve_identity_link(
+            module_name="srms",
+            keycloak_sub=str(payload.get("sub") or "").strip() or None,
+            email=str(email or "").strip().lower() or None,
+            username=str(preferred_username or "").strip().lower() or None,
+            preferred_tenant_id=None,
+            avoid_tenant_id=default_tenant_id,
+        )
+        if not resolved and default_tenant_id:
+            # Deterministic fallback for shared usernames across multiple tenants.
+            resolved = automation_store.resolve_identity_mapping(
+                tenant_id=default_tenant_id,
+                module_name="srms",
+                keycloak_sub=str(payload.get("sub") or "").strip() or None,
+                email=str(email or "").strip().lower() or None,
+                username=str(preferred_username or "").strip().lower() or None,
+            )
+        if resolved:
+            tenant_id = str(resolved.get("tenant_id") or "").strip() or None
+            if employee_id is None:
+                employee_id = resolved.get("module_user_id")
 
     if tenant_id is None or preferred_username is None:
         raise HTTPException(
@@ -134,7 +208,9 @@ async def _get_user_keycloak(
         tenant_id=str(tenant_id),
         roles=roles,
         effective_role=resolve_effective_role(roles),
+        employee_id=str(employee_id) if employee_id is not None else None,
         raw_token=token,
+        token_claims=payload,
     )
 
 
@@ -146,7 +222,7 @@ async def get_current_user(
     if settings.auth_mode == "dev":
         return await _get_user_dev(request)
     if settings.auth_mode == "keycloak":
-        return await _get_user_keycloak(credentials)
+        return await _get_user_keycloak(request, credentials)
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Invalid AUTH_MODE configuration.",

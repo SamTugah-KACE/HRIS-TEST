@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  CalendarDays, ExternalLink, CalendarCheck, CalendarClock, CalendarX,
+  CalendarDays, CalendarCheck, CalendarClock, CalendarX,
   CalendarPlus, CheckCircle, Download, Send, Filter, Eye, BarChart3,
 } from 'lucide-react';
 import { useAuth } from '../../auth/AuthProvider';
@@ -8,6 +8,8 @@ import { HRIS_ROLES, isManagerRole } from '../../auth/roles';
 import { StatCard } from '../../components/StatCard';
 import { LeaveApplicationModal } from '../../components/LeaveApplicationModal';
 import { clsx } from 'clsx';
+import { getLeaveModuleData, type LeaveModuleResponse } from '../../api/hrisCoreClient';
+import { isApiDataMode } from '../../config/dataMode';
 
 const LEAVE_BALANCES = [
   { type: 'Annual Leave', total: 23, used: 8, pending: 3, color: 'bg-blue-500' },
@@ -47,6 +49,9 @@ export const LeavePage: React.FC = () => {
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [managerActions, setManagerActions] = useState<Record<string, string>>({});
+  const [apiData, setApiData] = useState<LeaveModuleResponse | null>(null);
+  const [loading, setLoading] = useState(isApiDataMode);
+  const [error, setError] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -57,6 +62,47 @@ export const LeavePage: React.FC = () => {
     setManagerActions(prev => ({ ...prev, [id]: action }));
     showToast(`Leave request ${action}`);
   };
+
+  useEffect(() => {
+    if (!isApiDataMode) return;
+    let mounted = true;
+    setLoading(true);
+    setError(null);
+    getLeaveModuleData()
+      .then((d) => { if (mounted) setApiData(d); })
+      .catch(() => { if (mounted) setError('Failed to load leave module data in API mode.'); })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, []);
+
+  const managerStats = isApiDataMode && apiData
+    ? {
+      total: Number(apiData.manager.stats.total_this_year ?? 0),
+      approved: Number(apiData.manager.stats.approved ?? 0),
+      pending: Number(apiData.manager.stats.pending ?? 0),
+      rejected: Number(apiData.manager.stats.rejected ?? 0),
+    }
+    : { total: 320, approved: 280, pending: 25, rejected: 10 };
+  const pendingRequests = isApiDataMode ? (apiData?.manager.pending_requests ?? []) : PENDING_REQUESTS_MANAGER;
+  const leaveBalances = isApiDataMode ? (apiData?.employee.balances ?? []) : LEAVE_BALANCES;
+  const leaveHistory = isApiDataMode ? (apiData?.employee.history ?? []) : MY_LEAVE_HISTORY;
+  const holidays = isApiDataMode ? (apiData?.employee.holidays ?? []) : HOLIDAYS;
+
+  if (isApiDataMode && loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="h-10 w-10 animate-spin rounded-full border-4 border-gray-300 border-t-brand-500" />
+      </div>
+    );
+  }
+
+  if (isApiDataMode && (error || !apiData)) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-6">
+        <p className="text-sm text-red-700">{error ?? 'No leave data available in API mode.'}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -79,15 +125,18 @@ export const LeavePage: React.FC = () => {
               : 'View your leave balances, apply for leave, and track your leave history.'}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">native</span>
+            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">native-readonly</span>
+          </div>
+          <div className="flex gap-2">
           {!isManager && (
             <button onClick={() => setLeaveModalOpen(true)} className="btn-primary">
               <CalendarPlus className="h-4 w-4" /> Apply for Leave
             </button>
           )}
-          <a href="#" target="_blank" rel="noopener noreferrer" className="btn-secondary">
-            <ExternalLink className="h-4 w-4" /> Open eLeave
-          </a>
+          </div>
         </div>
       </div>
 
@@ -95,15 +144,15 @@ export const LeavePage: React.FC = () => {
       {isManager ? (
         <>
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <StatCard label="Total This Year" value={320} icon={CalendarDays} color="blue" />
-            <StatCard label="Approved" value={280} icon={CalendarCheck} color="green" />
-            <StatCard label="Pending" value={25} icon={CalendarClock} color="amber" />
-            <StatCard label="Rejected" value={10} icon={CalendarX} color="red" />
+            <StatCard label="Total This Year" value={managerStats.total} icon={CalendarDays} color="blue" />
+            <StatCard label="Approved" value={managerStats.approved} icon={CalendarCheck} color="green" />
+            <StatCard label="Pending" value={managerStats.pending} icon={CalendarClock} color="amber" />
+            <StatCard label="Rejected" value={managerStats.rejected} icon={CalendarX} color="red" />
           </div>
 
           <div className="card">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-900">Pending Leave Requests ({PENDING_REQUESTS_MANAGER.length})</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Pending Leave Requests ({pendingRequests.length})</h2>
               <div className="flex gap-2">
                 <button onClick={() => showToast('Exporting leave data...')} className="btn-secondary py-1.5 text-xs">
                   <Download className="h-3.5 w-3.5" /> Export
@@ -126,19 +175,19 @@ export const LeavePage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {PENDING_REQUESTS_MANAGER.map(req => (
+                  {pendingRequests.map(req => (
                     <tr key={req.id} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
-                        <p className="font-medium text-gray-900">{req.name}</p>
-                        <p className="text-xs text-gray-500">{req.department}</p>
+                        <p className="font-medium text-gray-900">{String(req.name ?? 'Employee')}</p>
+                        <p className="text-xs text-gray-500">{String(req.department ?? '')}</p>
                       </td>
-                      <td className="px-4 py-3 text-gray-600">{req.type}</td>
+                      <td className="px-4 py-3 text-gray-600">{String(req.type ?? '')}</td>
                       <td className="px-4 py-3">
-                        <p className="text-gray-900">{req.days} day{req.days > 1 ? 's' : ''}</p>
-                        <p className="text-xs text-gray-500">{req.from} to {req.to}</p>
+                        <p className="text-gray-900">{String(req.days ?? 0)} day{Number(req.days ?? 0) > 1 ? 's' : ''}</p>
+                        <p className="text-xs text-gray-500">{String(req.from ?? '')} to {String(req.to ?? '')}</p>
                       </td>
-                      <td className="px-4 py-3 text-gray-600">{req.reliefOfficer}</td>
-                      <td className="px-4 py-3 text-xs text-gray-500">{req.appliedOn}</td>
+                      <td className="px-4 py-3 text-gray-600">{String(req.reliefOfficer ?? '')}</td>
+                      <td className="px-4 py-3 text-xs text-gray-500">{String(req.appliedOn ?? '')}</td>
                       <td className="px-4 py-3">
                         {managerActions[req.id] ? (
                           <span className={clsx('rounded-full px-2.5 py-0.5 text-xs font-medium',
@@ -154,7 +203,7 @@ export const LeavePage: React.FC = () => {
                             <button onClick={() => handleManagerAction(req.id, 'rejected')} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100">
                               Reject
                             </button>
-                            <button onClick={() => showToast(`Viewing ${req.name}'s details...`)} className="rounded-lg bg-gray-50 px-2 py-1 text-gray-500 hover:bg-gray-100">
+                            <button onClick={() => showToast(`Viewing ${String(req.name ?? 'employee')}'s details...`)} className="rounded-lg bg-gray-50 px-2 py-1 text-gray-500 hover:bg-gray-100">
                               <Eye className="h-3.5 w-3.5" />
                             </button>
                           </div>
@@ -194,27 +243,30 @@ export const LeavePage: React.FC = () => {
               <span className="text-xs text-gray-500">As of Feb 2026</span>
             </div>
             <div className="space-y-4">
-              {LEAVE_BALANCES.map((b, i) => {
-                const available = b.total - b.used - b.pending;
-                const usedPercent = (b.used / b.total) * 100;
-                const pendingPercent = (b.pending / b.total) * 100;
+              {leaveBalances.map((b, i) => {
+                const total = Number(b.total ?? 0);
+                const used = Number(b.used ?? 0);
+                const pending = Number(b.pending ?? 0);
+                const available = total - used - pending;
+                const usedPercent = total > 0 ? (used / total) * 100 : 0;
+                const pendingPercent = total > 0 ? (pending / total) * 100 : 0;
                 return (
                   <div key={i}>
                     <div className="mb-1.5 flex items-center justify-between">
-                      <p className="text-sm font-medium text-gray-900">{b.type}</p>
+                      <p className="text-sm font-medium text-gray-900">{String(b.type ?? 'Leave')}</p>
                       <p className="text-sm text-gray-500">
-                        <span className="font-semibold text-gray-900">{available}</span> / {b.total} days available
+                        <span className="font-semibold text-gray-900">{available}</span> / {total} days available
                       </p>
                     </div>
                     <div className="flex h-2.5 overflow-hidden rounded-full bg-gray-100">
-                      <div className={clsx('transition-all', b.color)} style={{ width: `${usedPercent}%` }} />
+                      <div className={clsx('transition-all', String(b.color ?? 'bg-gray-500'))} style={{ width: `${usedPercent}%` }} />
                       {pendingPercent > 0 && (
                         <div className="bg-amber-400" style={{ width: `${pendingPercent}%` }} />
                       )}
                     </div>
                     <div className="mt-1 flex gap-4 text-xs text-gray-500">
-                      <span>Used: {b.used}</span>
-                      {b.pending > 0 && <span className="text-amber-600">Pending: {b.pending}</span>}
+                      <span>Used: {used}</span>
+                      {pending > 0 && <span className="text-amber-600">Pending: {pending}</span>}
                     </div>
                   </div>
                 );
@@ -242,17 +294,17 @@ export const LeavePage: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {MY_LEAVE_HISTORY.map(l => (
+                    {leaveHistory.map(l => (
                       <tr key={l.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => showToast(`Viewing leave ${l.id} details...`)}>
-                        <td className="px-4 py-3 font-medium text-gray-900">{l.type}</td>
-                        <td className="px-4 py-3 text-gray-600">{l.days}</td>
-                        <td className="px-4 py-3 text-xs text-gray-500">{l.startDate} to {l.endDate}</td>
+                        <td className="px-4 py-3 font-medium text-gray-900">{String(l.type ?? '')}</td>
+                        <td className="px-4 py-3 text-gray-600">{String(l.days ?? 0)}</td>
+                        <td className="px-4 py-3 text-xs text-gray-500">{String(l.startDate ?? '')} to {String(l.endDate ?? '')}</td>
                         <td className="px-4 py-3">
                           <span className={clsx('rounded-full px-2 py-0.5 text-xs font-medium',
-                            l.status === 'approved' ? 'bg-emerald-50 text-emerald-700' :
-                            l.status === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'
+                            String(l.status) === 'approved' ? 'bg-emerald-50 text-emerald-700' :
+                            String(l.status) === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'
                           )}>
-                            {l.status}
+                            {String(l.status ?? '')}
                           </span>
                         </td>
                       </tr>
@@ -266,14 +318,14 @@ export const LeavePage: React.FC = () => {
             <div className="card">
               <h2 className="mb-4 text-sm font-semibold text-gray-900">Upcoming Holidays</h2>
               <div className="space-y-3">
-                {HOLIDAYS.map((h, i) => (
+                {holidays.map((h, i) => (
                   <div key={i} className="flex items-center gap-3 rounded-lg border border-gray-100 p-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-green-50">
                       <CalendarCheck className="h-4 w-4 text-green-600" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-gray-900">{h.name}</p>
-                      <p className="text-xs text-gray-500">{h.date}</p>
+                      <p className="text-sm font-medium text-gray-900">{String(h.name ?? '')}</p>
+                      <p className="text-xs text-gray-500">{String(h.date ?? '')}</p>
                     </div>
                   </div>
                 ))}

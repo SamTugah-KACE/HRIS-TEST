@@ -1,14 +1,16 @@
+from datetime import datetime
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.core.settings import get_settings
 from app.dependencies.db import get_db
 from app.models.tenant import Tenant
-from app.schemas.tenant import TenantOut
+from app.schemas.tenant import TenantImportIn, TenantImportResult, TenantOut
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -54,3 +56,81 @@ def get_tenant(tenant_id: UUID, db: Session = Depends(get_db)) -> TenantOut:
             detail="Tenant not found",
         )
     return TenantOut.model_validate(tenant)
+
+
+@router.post(
+    "/sync/import",
+    response_model=TenantImportResult,
+    dependencies=[Depends(verify_internal_client)],
+)
+def import_tenant(payload: TenantImportIn, db: Session = Depends(get_db)) -> TenantImportResult:
+    incoming_code = payload.code.strip()
+    incoming_name = payload.name.strip()
+    if not incoming_code or not incoming_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="code and name are required",
+        )
+
+    # Idempotency key: tenant_id (preferred) or code.
+    existing = None
+    if payload.tenant_id is not None:
+        existing = db.query(Tenant).filter(Tenant.tenant_id == payload.tenant_id).first()
+    if existing is None:
+        existing = db.query(Tenant).filter(Tenant.code == incoming_code).first()
+
+    if existing is not None:
+        # Idempotent merge: keep canonical identity but fill missing module metadata.
+        # This allows multi-module inventory imports to enrich one tenant row over time.
+        changed = False
+        if payload.srms_schema and not existing.srms_schema:
+            existing.srms_schema = payload.srms_schema
+            changed = True
+        if payload.srms_slug and not existing.srms_slug:
+            existing.srms_slug = payload.srms_slug
+            changed = True
+        if payload.eappraisal_subdomain and not existing.eappraisal_subdomain:
+            existing.eappraisal_subdomain = payload.eappraisal_subdomain
+            changed = True
+        if payload.eleave_subdomain and not existing.eleave_subdomain:
+            existing.eleave_subdomain = payload.eleave_subdomain
+            changed = True
+        # Prefer active state if any trusted source marks tenant active.
+        if payload.is_active and not existing.is_active:
+            existing.is_active = True
+            changed = True
+        if changed:
+            existing.updated_at = datetime.utcnow()
+            db.add(existing)
+            db.commit()
+            db.refresh(existing)
+        return TenantImportResult(inserted=False, tenant=TenantOut.model_validate(existing))
+
+    now = datetime.utcnow()
+    tenant = Tenant(
+        tenant_id=payload.tenant_id or uuid4(),
+        code=incoming_code,
+        name=incoming_name,
+        srms_schema=(payload.srms_schema or None),
+        srms_slug=(payload.srms_slug or None),
+        eappraisal_subdomain=(payload.eappraisal_subdomain or None),
+        eleave_subdomain=(payload.eleave_subdomain or None),
+        is_active=payload.is_active,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(tenant)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Handle concurrent inserts safely as idempotent behavior.
+        db.rollback()
+        if payload.tenant_id is not None:
+            existing = db.query(Tenant).filter(Tenant.tenant_id == payload.tenant_id).first()
+        if existing is None:
+            existing = db.query(Tenant).filter(Tenant.code == incoming_code).first()
+        if existing is None:
+            raise
+        return TenantImportResult(inserted=False, tenant=TenantOut.model_validate(existing))
+    db.refresh(tenant)
+    return TenantImportResult(inserted=True, tenant=TenantOut.model_validate(tenant))

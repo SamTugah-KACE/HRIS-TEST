@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   User, Mail, Phone, MapPin, Calendar, Briefcase, GraduationCap,
   Shield, Heart, FileText, Pencil, Save, X, Camera, Download,
   Award, Clock, CheckCircle, AlertCircle, ChevronRight,
 } from 'lucide-react';
 import { clsx } from 'clsx';
+import { getMyProfile, type ProfileDataResponse } from '../api/hrisCoreClient';
+import { isApiDataMode } from '../config/dataMode';
 
 type TabId = 'personal' | 'employment' | 'qualifications' | 'emergency' | 'documents';
 
@@ -87,6 +89,9 @@ export const ProfilePage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('personal');
   const [editing, setEditing] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [apiData, setApiData] = useState<ProfileDataResponse | null>(null);
+  const [loading, setLoading] = useState(isApiDataMode);
+  const [error, setError] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -97,6 +102,144 @@ export const ProfilePage: React.FC = () => {
     setEditing(false);
     showToast('Profile updated successfully');
   };
+
+  useEffect(() => {
+    if (!isApiDataMode) return;
+    let mounted = true;
+    setLoading(true);
+    setError(null);
+    getMyProfile()
+      .then((data) => {
+        if (mounted) setApiData(data);
+      })
+      .catch(() => {
+        if (mounted) setError('Failed to load profile data from API mode.');
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (isApiDataMode) {
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center py-20">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-gray-300 border-t-brand-500" />
+        </div>
+      );
+    }
+
+    if (error || !apiData) {
+      return (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6">
+          <p className="text-sm text-red-700">{error ?? 'No profile data available in API mode.'}</p>
+        </div>
+      );
+    }
+
+    const profile = apiData.profile;
+    const employment = apiData.employment;
+    const qualifications = apiData.qualifications;
+    const contacts = apiData.emergency_contacts;
+    const documents = apiData.documents;
+    const quickStats = apiData.quick_stats;
+
+    const fullName = [profile.firstName, profile.otherNames, profile.lastName].filter(Boolean).join(' ');
+
+    return (
+      <div className="space-y-6">
+        <div className="card overflow-hidden p-0">
+          <div className="bg-gradient-to-r from-brand-600 to-brand-700 px-6 py-8 text-white">
+            <h1 className="text-2xl font-bold">{fullName || 'My Profile'}</h1>
+            <p className="mt-1 text-sm text-white/80">
+              {(employment.position as string) || 'Position not available'} &middot; {(employment.department as string) || 'Department not available'}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="rounded-full bg-emerald-400/30 px-2.5 py-0.5 text-xs font-medium text-emerald-100">native</span>
+              <span className="rounded-full bg-blue-400/30 px-2.5 py-0.5 text-xs font-medium text-blue-100">native-readonly</span>
+              <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-medium">{String(profile.staffId ?? 'N/A')}</span>
+              <span className="rounded-full bg-emerald-400/30 px-2.5 py-0.5 text-xs font-medium text-emerald-100">{String(employment.status ?? 'N/A')}</span>
+              <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-medium">{String(employment.branch ?? 'N/A')}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 divide-x divide-gray-100 border-b border-gray-100 sm:grid-cols-4">
+            {[
+              { label: 'Years of Service', value: String(quickStats.years_of_service ?? 'N/A'), icon: Clock },
+              { label: 'Leave Balance', value: String(quickStats.leave_balance ?? 'N/A'), icon: Calendar },
+              { label: 'Appraisal Score', value: String(quickStats.appraisal_score ?? 'N/A'), icon: Award },
+              { label: 'Certifications', value: String(quickStats.certifications ?? 'N/A'), icon: GraduationCap },
+            ].map(s => (
+              <div key={s.label} className="flex items-center gap-3 px-4 py-3">
+                <s.icon className="h-5 w-5 text-brand-500" />
+                <div>
+                  <p className="text-xs text-gray-500">{s.label}</p>
+                  <p className="text-sm font-semibold text-gray-900">{s.value}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="card">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900">Personal</h3>
+            <dl className="space-y-2 text-sm">
+              <div><dt className="text-gray-500">Email</dt><dd className="font-medium text-gray-900">{String(profile.email ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Phone</dt><dd className="font-medium text-gray-900">{String(profile.phone ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Gender</dt><dd className="font-medium text-gray-900">{String(profile.gender ?? 'N/A')}</dd></div>
+            </dl>
+          </div>
+          <div className="card">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900">Employment</h3>
+            <dl className="space-y-2 text-sm">
+              <div><dt className="text-gray-500">Organization</dt><dd className="font-medium text-gray-900">{String(employment.organization ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Department</dt><dd className="font-medium text-gray-900">{String(employment.department ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Rank</dt><dd className="font-medium text-gray-900">{String(employment.rank ?? 'N/A')}</dd></div>
+            </dl>
+          </div>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="card lg:col-span-1">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900">Qualifications</h3>
+            <div className="space-y-2">
+              {qualifications.length === 0 ? <p className="text-sm text-gray-500">No qualifications available.</p> : qualifications.map((q, i) => (
+                <div key={i} className="rounded-lg border border-gray-100 p-3">
+                  <p className="text-sm font-medium text-gray-900">{String(q.title ?? 'Untitled')}</p>
+                  <p className="text-xs text-gray-500">{String(q.institution ?? '')}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="card lg:col-span-1">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900">Emergency Contacts</h3>
+            <div className="space-y-2">
+              {contacts.length === 0 ? <p className="text-sm text-gray-500">No contacts available.</p> : contacts.map((c, i) => (
+                <div key={i} className="rounded-lg border border-gray-100 p-3">
+                  <p className="text-sm font-medium text-gray-900">{String(c.name ?? 'N/A')}</p>
+                  <p className="text-xs text-gray-500">{String(c.relationship ?? '')} &middot; {String(c.phone ?? '')}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="card lg:col-span-1">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900">Documents</h3>
+            <div className="space-y-2">
+              {documents.length === 0 ? <p className="text-sm text-gray-500">No documents available.</p> : documents.map((d, i) => (
+                <div key={i} className="rounded-lg border border-gray-100 p-3">
+                  <p className="text-sm font-medium text-gray-900">{String(d.name ?? 'Untitled')}</p>
+                  <p className="text-xs text-gray-500">{String(d.category ?? '')} &middot; {String(d.type ?? '')}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

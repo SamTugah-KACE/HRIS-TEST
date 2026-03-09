@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
   Users,
   ClipboardList,
   CalendarDays,
+  Layers,
   FileText,
   Shield,
   Building2,
@@ -13,6 +14,8 @@ import {
 import { useAuth } from '../auth/AuthProvider';
 import { hasMinimumRole, HRIS_ROLES, getRoleLabel } from '../auth/roles';
 import { clsx } from 'clsx';
+import { getModulesCatalog, getTenantBranding, type ModuleCatalogItem } from '../api/hrisCoreClient';
+import { httpClient } from '../api/httpClient';
 
 type SidebarProps = {
   open: boolean;
@@ -30,6 +33,67 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
   const { user } = useAuth();
   const role = user?.effectiveRole ?? HRIS_ROLES.EMPLOYEE;
+  const [brandName, setBrandName] = useState('HRIS Portal');
+  const [logoPrimaryUri, setLogoPrimaryUri] = useState<string>('');
+  const [catalogModules, setCatalogModules] = useState<ModuleCatalogItem[]>([]);
+
+  const toAbsoluteLogoUrl = (value: string): string => {
+    const raw = (value || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    if (raw.startsWith('/')) {
+      const base = String(httpClient.defaults.baseURL || '').replace(/\/+$/, '');
+      return `${base}${raw}`;
+    }
+    return raw;
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    if (!user?.tenantId) return () => { mounted = false; };
+    getTenantBranding(user.tenantId)
+      .then((response) => {
+        if (!mounted) return;
+        setBrandName(response.branding?.brand_name || 'HRIS Portal');
+        setLogoPrimaryUri(toAbsoluteLogoUrl(response.branding?.logo_primary_uri || ''));
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setBrandName('HRIS Portal');
+        setLogoPrimaryUri('');
+      });
+    return () => { mounted = false; };
+  }, [user?.tenantId]);
+
+  useEffect(() => {
+    let mounted = true;
+    getModulesCatalog()
+      .then((response) => {
+        if (!mounted) return;
+        setCatalogModules(Array.isArray(response.modules) ? response.modules : []);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setCatalogModules([]);
+      });
+    return () => { mounted = false; };
+  }, [user?.tenantId, role]);
+
+  const iconForModule = (moduleId: string) => {
+    const normalized = moduleId.toLowerCase();
+    if (normalized === 'srms') return Users;
+    if (normalized === 'eappraisal') return ClipboardList;
+    if (normalized === 'eleave') return CalendarDays;
+    return Layers;
+  };
+
+  const visibleModules = catalogModules
+    .filter((module) => module.enabled && module.visible && module.ui?.path)
+    .map((module) => ({
+      ...module,
+      path: String(module.ui.path),
+      icon: iconForModule(module.id),
+    }));
 
   return (
     <>
@@ -44,10 +108,18 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
       >
         <div className="flex h-16 items-center justify-between border-b border-gray-200 px-4">
           <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-500 text-xs font-bold text-white">
-              HR
-            </div>
-            <span className="text-base font-semibold text-gray-900">HRIS Portal</span>
+            {logoPrimaryUri ? (
+              <img
+                alt={brandName}
+                className="h-8 w-8 rounded object-contain"
+                src={logoPrimaryUri}
+              />
+            ) : (
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-500 text-xs font-bold text-white">
+                HR
+              </div>
+            )}
+            <span className="text-base font-semibold text-gray-900">{brandName}</span>
           </div>
           <button onClick={onClose} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 lg:hidden">
             <X className="h-5 w-5" />
@@ -63,15 +135,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
           {hasMinimumRole(role, HRIS_ROLES.LINE_MANAGER) && (
             <>
               <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">HR Modules</p>
-              <NavLink to="/employees" className={navLinkClass} onClick={onClose}>
-                <Users className="h-4 w-4" /> Staff Records
-              </NavLink>
-              <NavLink to="/modules/appraisal" className={navLinkClass} onClick={onClose}>
-                <ClipboardList className="h-4 w-4" /> Performance Appraisal
-              </NavLink>
-              <NavLink to="/modules/leave" className={navLinkClass} onClick={onClose}>
-                <CalendarDays className="h-4 w-4" /> Leave Management
-              </NavLink>
+              {(visibleModules.length > 0 ? visibleModules : [
+                { id: 'srms', label: 'Staff Records', path: '/employees', icon: Users },
+                { id: 'eappraisal', label: 'Performance Appraisal', path: '/modules/appraisal', icon: ClipboardList },
+                { id: 'eleave', label: 'Leave Management', path: '/modules/leave', icon: CalendarDays },
+              ]).map((module) => (
+                <NavLink key={module.id} to={module.path} className={navLinkClass} onClick={onClose}>
+                  <module.icon className="h-4 w-4" /> {module.label}
+                </NavLink>
+              ))}
             </>
           )}
 
@@ -81,12 +153,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
               <NavLink to="/profile" className={navLinkClass} onClick={onClose}>
                 <Users className="h-4 w-4" /> My Profile
               </NavLink>
-              <NavLink to="/modules/appraisal" className={navLinkClass} onClick={onClose}>
-                <ClipboardList className="h-4 w-4" /> My Appraisals
-              </NavLink>
-              <NavLink to="/modules/leave" className={navLinkClass} onClick={onClose}>
-                <CalendarDays className="h-4 w-4" /> My Leave
-              </NavLink>
+              {(visibleModules.filter((module) => module.id !== 'srms').length > 0
+                ? visibleModules.filter((module) => module.id !== 'srms')
+                : [
+                    { id: 'eappraisal', label: 'My Appraisals', path: '/modules/appraisal', icon: ClipboardList },
+                    { id: 'eleave', label: 'My Leave', path: '/modules/leave', icon: CalendarDays },
+                  ]
+              ).map((module) => (
+                <NavLink key={module.id} to={module.path} className={navLinkClass} onClick={onClose}>
+                  <module.icon className="h-4 w-4" /> {module.label}
+                </NavLink>
+              ))}
             </>
           )}
 

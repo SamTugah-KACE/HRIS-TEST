@@ -4,9 +4,6 @@ WORKDIR /app
 
 ARG VITE_HRIS_CORE_API_BASE_URL=http://localhost:8000
 ARG VITE_AUTH_MODE=dev
-ARG VITE_KEYCLOAK_URL=http://localhost:8080
-ARG VITE_KEYCLOAK_REALM=hris-platform
-ARG VITE_KEYCLOAK_CLIENT_ID=hris-portal
 
 COPY package.json package-lock.json* ./
 RUN npm ci --ignore-scripts || npm install
@@ -15,10 +12,7 @@ COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.htm
 COPY src ./src
 
 RUN echo "VITE_HRIS_CORE_API_BASE_URL=$VITE_HRIS_CORE_API_BASE_URL" > .env.production \
- && echo "VITE_AUTH_MODE=$VITE_AUTH_MODE" >> .env.production \
- && echo "VITE_KEYCLOAK_URL=$VITE_KEYCLOAK_URL" >> .env.production \
- && echo "VITE_KEYCLOAK_REALM=$VITE_KEYCLOAK_REALM" >> .env.production \
- && echo "VITE_KEYCLOAK_CLIENT_ID=$VITE_KEYCLOAK_CLIENT_ID" >> .env.production
+ && echo "VITE_AUTH_MODE=$VITE_AUTH_MODE" >> .env.production
 
 RUN npm run build
 

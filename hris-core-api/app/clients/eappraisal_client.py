@@ -1,29 +1,30 @@
 from typing import Any, Dict, Optional
 
-import httpx
-from fastapi import HTTPException, status
-
+from app.adapters.registry import get_eappraisal_adapter
 from app.core.settings import get_settings
 from app.models.tenant_mapping import TenantMapping
 
-settings = get_settings()
+
+def _settings():
+    return get_settings()
 
 
-def _get_http_client() -> httpx.Client:
-    return httpx.Client(timeout=settings.http_client_timeout_seconds)
-
-
-def _build_base_url(mapping: TenantMapping) -> str:
-    if not mapping.eappraisal_subdomain:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="eAppraisal not configured for this tenant",
-        )
-    return settings.eappraisal_domain_template.format(subdomain=mapping.eappraisal_subdomain)
+def _should_use_stub(token: Optional[str]) -> bool:
+    settings = _settings()
+    has_live_auth = bool(token or settings.eappraisal_service_token or settings.eappraisal_refresh_token)
+    if not settings.eappraisal_domain_template:
+        return True
+    if settings.use_stub_data and not has_live_auth:
+        return True
+    return False
 
 
 def get_appraisal_summary(mapping: TenantMapping, token: Optional[str]) -> Dict[str, Any]:
-    if settings.use_stub_data or not settings.eappraisal_domain_template:
+    settings = _settings()
+    if settings.eappraisal_fixture_file:
+        return get_eappraisal_adapter().get_appraisal_summary(mapping, token)
+
+    if _should_use_stub(token):
         return {
             "active_cycles": 1,
             "pending_reviews": 12,
@@ -33,25 +34,15 @@ def get_appraisal_summary(mapping: TenantMapping, token: Optional[str]) -> Dict[
             "completion_rate": 88.0,
         }
 
-    base_url = _build_base_url(mapping)
-    url = f"{base_url}/api/hris/appraisals/summary"
-    headers: Dict[str, str] = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    with _get_http_client() as client:
-        response = client.get(url, headers=headers)
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Error calling eAppraisal: {exc}") from exc
-
-    return response.json()
+    return get_eappraisal_adapter().get_appraisal_summary(mapping, token)
 
 
 def get_employee_appraisals(mapping: TenantMapping, employee_id: str, token: Optional[str]) -> Dict[str, Any]:
-    if settings.use_stub_data or not settings.eappraisal_domain_template:
+    settings = _settings()
+    if settings.eappraisal_fixture_file:
+        return get_eappraisal_adapter().get_employee_appraisals(mapping, employee_id, token)
+
+    if _should_use_stub(token):
         return {
             "employee_id": employee_id,
             "appraisals": [
@@ -61,21 +52,23 @@ def get_employee_appraisals(mapping: TenantMapping, employee_id: str, token: Opt
             ],
         }
 
-    base_url = _build_base_url(mapping)
-    url = f"{base_url}/api/hris/employees/{employee_id}/appraisals"
-    headers: Dict[str, str] = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    return get_eappraisal_adapter().get_employee_appraisals(mapping, employee_id, token)
 
-    with _get_http_client() as client:
-        response = client.get(url, headers=headers)
 
-    if response.status_code == 404:
-        return {"employee_id": employee_id, "appraisals": []}
+def get_my_appraisals(mapping: TenantMapping, token: Optional[str]) -> Dict[str, Any]:
+    settings = _settings()
+    if settings.eappraisal_fixture_file:
+        return get_eappraisal_adapter().get_my_appraisals(mapping, token)
 
-    try:
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Error calling eAppraisal: {exc}") from exc
+    if _should_use_stub(token):
+        return {
+            "current_cycle": {"title": "2025/2026 Appraisal Cycle", "due_date": "Mar 30, 2026", "overall_progress": 40},
+            "sections": [
+                {"name": "Key Result Areas (KRA)", "weight": 40, "status": "completed", "score": 4.1, "maxScore": 5},
+                {"name": "Core Competencies", "weight": 25, "status": "completed", "score": 3.8, "maxScore": 5},
+                {"name": "Leadership & Initiative", "weight": 15, "status": "in_progress", "score": None, "maxScore": 5},
+            ],
+            "goals": [],
+        }
 
-    return response.json()
+    return get_eappraisal_adapter().get_my_appraisals(mapping, token)

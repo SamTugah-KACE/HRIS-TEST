@@ -3,6 +3,7 @@ import {
   Users,
   UserCheck,
   User,
+  Building2,
   Layers,
   ClipboardCheck,
   ClipboardList,
@@ -11,18 +12,33 @@ import {
   CalendarClock,
   CalendarPlus,
   TrendingUp,
-  Briefcase,
   Star,
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { useAuth } from '../auth/AuthProvider';
 import { getDashboardSummary, type DashboardSummary } from '../api/hrisCoreClient';
-import { hasMinimumRole, HRIS_ROLES, getRoleLabel, isManagerRole } from '../auth/roles';
+import { getMyProfile, getAppraisalModuleData, getLeaveModuleData, type ProfileDataResponse, type AppraisalModuleResponse, type LeaveModuleResponse } from '../api/hrisCoreClient';
+import { getIntegrationsSummary, type IntegrationsSummaryResponse } from '../api/hrisCoreClient';
+import { getModulesCatalog, type ModuleCatalogItem } from '../api/hrisCoreClient';
+import { HRIS_ROLES, getRoleLabel, isManagerRole } from '../auth/roles';
 import { StatCard } from '../components/StatCard';
 import { ModuleCard } from '../components/ModuleCard';
 import { Link } from 'react-router-dom';
+import { isApiDataMode } from '../config/dataMode';
 
 const PIE_COLORS = ['#10b981', '#f59e0b', '#ef4444', '#6b7280'];
+
+function toSafeHttpUrl(raw: string): string | null {
+  const value = (raw || '').trim();
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function getDashboardTitle(role: string): string {
   switch (role) {
@@ -47,11 +63,19 @@ function getDashboardSubtitle(role: string): string {
 export const DashboardPage: React.FC = () => {
   const { user } = useAuth();
   const [data, setData] = useState<DashboardSummary | null>(null);
+  const [profileData, setProfileData] = useState<ProfileDataResponse | null>(null);
+  const [appraisalData, setAppraisalData] = useState<AppraisalModuleResponse | null>(null);
+  const [leaveData, setLeaveData] = useState<LeaveModuleResponse | null>(null);
+  const [integrationSummary, setIntegrationSummary] = useState<IntegrationsSummaryResponse | null>(null);
+  const [catalogModules, setCatalogModules] = useState<ModuleCatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const role = user?.effectiveRole ?? HRIS_ROLES.EMPLOYEE;
+  const tenantId = user?.tenantId ?? '';
+  const userSub = user?.sub ?? '';
   const isManager = isManagerRole(role);
+  const isSuperAdmin = role === HRIS_ROLES.SUPER_ADMIN;
 
   useEffect(() => {
     let mounted = true;
@@ -62,7 +86,51 @@ export const DashboardPage: React.FC = () => {
       .catch(() => { if (mounted) setError('Failed to load dashboard data.'); })
       .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
-  }, [role]);
+  }, [role, tenantId, userSub]);
+
+  useEffect(() => {
+    if (!isApiDataMode || isManager) return;
+    let mounted = true;
+    Promise.all([getMyProfile(), getAppraisalModuleData(), getLeaveModuleData()])
+      .then(([profile, appraisal, leave]) => {
+        if (!mounted) return;
+        setProfileData(profile);
+        setAppraisalData(appraisal);
+        setLeaveData(leave);
+      })
+      .catch(() => {
+        // Keep page resilient; top-level summary still loads and drives navigation/actions.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [isManager, role]);
+
+  useEffect(() => {
+    let mounted = true;
+    getModulesCatalog()
+      .then((result) => {
+        if (!mounted) return;
+        setCatalogModules(Array.isArray(result.modules) ? result.modules : []);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setCatalogModules([]);
+      });
+    return () => { mounted = false; };
+  }, [role, tenantId, userSub]);
+
+  useEffect(() => {
+    if (!isManager) {
+      setIntegrationSummary(null);
+      return;
+    }
+    let mounted = true;
+    getIntegrationsSummary()
+      .then((result) => { if (mounted) setIntegrationSummary(result); })
+      .catch(() => { if (mounted) setIntegrationSummary(null); });
+    return () => { mounted = false; };
+  }, [isManager, role, tenantId, userSub]);
 
   if (loading) {
     return (
@@ -94,6 +162,28 @@ export const DashboardPage: React.FC = () => {
     { name: 'Pending', count: data.srms.pending_enlistments },
   ];
 
+  const employeeBalances = leaveData?.employee.balances ?? [];
+  const annualBalance = employeeBalances.find((b) => String(b.type).toLowerCase().includes('annual'));
+  const appraisalSections = appraisalData?.employee.sections ?? [];
+  const appraisalCompleted = appraisalSections.filter((s) => String(s.status) === 'completed').length;
+  const appraisalProgress = appraisalSections.length > 0 ? Math.round((appraisalCompleted / appraisalSections.length) * 100) : 0;
+  const employeeStatus = String(profileData?.employment.status ?? 'Active');
+  const employeeDepartment = String(profileData?.employment.department ?? 'N/A');
+  const employeeBranch = String(profileData?.employment.branch ?? 'N/A');
+  const employeeStaffId = String(profileData?.profile.staffId ?? 'N/A');
+  const annualTotal = Number(annualBalance?.total ?? 0);
+  const annualUsed = Number(annualBalance?.used ?? 0);
+  const annualPending = Number(annualBalance?.pending ?? 0);
+  const annualAvailable = Math.max(0, annualTotal - annualUsed - annualPending);
+  const enabledModuleIds = new Set(
+    catalogModules
+      .filter((module) => module.enabled && module.visible)
+      .map((module) => String(module.id).toLowerCase())
+  );
+  const hasSrms = enabledModuleIds.size === 0 || enabledModuleIds.has('srms');
+  const hasEappraisal = enabledModuleIds.size === 0 || enabledModuleIds.has('eappraisal');
+  const hasEleave = enabledModuleIds.size === 0 || enabledModuleIds.has('eleave');
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -124,13 +214,107 @@ export const DashboardPage: React.FC = () => {
         </div>
       )}
 
+      {isManager && integrationSummary && (
+        <div className="card">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-900">Integration Health</h3>
+            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${integrationSummary.overall_ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+              {integrationSummary.overall_ok ? 'Healthy' : 'Attention Needed'}
+            </span>
+          </div>
+          <div className="grid gap-2 md:grid-cols-3">
+            {([...enabledModuleIds].length > 0 ? [...enabledModuleIds] : ['srms', 'eappraisal', 'eleave']).map((moduleName) => {
+              const moduleInfo = integrationSummary.modules[moduleName];
+              if (!moduleInfo) return null;
+              return (
+                <div key={moduleName} className="rounded-lg border border-gray-200 px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{moduleName}</p>
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${moduleInfo.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                      {moduleInfo.ok ? 'ok' : 'issue'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-600">{moduleInfo.detail || 'n/a'}</p>
+                </div>
+              );
+            })}
+          </div>
+          {(integrationSummary.recommended_actions || []).length > 0 && (
+            <p className="mt-3 text-xs text-amber-700">
+              {integrationSummary.recommended_actions?.[0]}
+            </p>
+          )}
+        </div>
+      )}
+
+      {isSuperAdmin && data.superadmin && (
+        <div className="card">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">SRMS Tenant Organizations</h3>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-gray-600">
+              <span className="rounded-full bg-gray-100 px-2 py-0.5">Total {data.superadmin.tenant_summary.total}</span>
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">Active {data.superadmin.tenant_summary.active}</span>
+              <span className="rounded-full bg-gray-100 px-2 py-0.5">Inactive {data.superadmin.tenant_summary.inactive}</span>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <thead className="border-b border-gray-200 bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 font-medium text-gray-500">Organization</th>
+                  <th className="px-3 py-2 font-medium text-gray-500">Organization Type</th>
+                  <th className="px-3 py-2 font-medium text-gray-500">Domain</th>
+                  <th className="px-3 py-2 font-medium text-gray-500">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {data.superadmin.tenants.map((tenant) => {
+                  const rowOrganizationType = tenant.organization_type || (tenant.type && tenant.nature ? `${tenant.type} - ${tenant.nature}` : '') || 'N/A';
+                  const rowDomain = tenant.access_url || tenant.slug || 'N/A';
+                  const safeDomainUrl = toSafeHttpUrl(rowDomain === 'N/A' ? '' : rowDomain);
+                  return (
+                  <tr key={tenant.tenant_id || `${tenant.name}-${rowDomain}`} className="hover:bg-gray-50">
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <Building2 className="h-4 w-4 text-gray-400" />
+                        <span className="font-medium text-gray-900">{tenant.name}</span>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs text-gray-600">{rowOrganizationType}</td>
+                    <td className="px-3 py-2 text-xs text-gray-600">
+                      {safeDomainUrl ? (
+                        <a
+                          className="text-brand-600 hover:underline"
+                          href={safeDomainUrl}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          {safeDomainUrl}
+                        </a>
+                      ) : rowDomain}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${tenant.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
+                        {tenant.status}
+                      </span>
+                    </td>
+                  </tr>
+                )})}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Employee self-service stats */}
       {!isManager && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <StatCard label="Leave Balance" value="15 days" icon={CalendarDays} color="blue" />
-          <StatCard label="Leave Taken" value="8 days" icon={CalendarCheck} color="green" />
-          <StatCard label="Pending Requests" value="1" icon={CalendarClock} color="amber" />
-          <StatCard label="Appraisal Status" value="In Progress" icon={ClipboardCheck} color="purple" />
+          <StatCard label="Leave Balance" value={isApiDataMode ? `${annualAvailable} days` : '15 days'} icon={CalendarDays} color="blue" />
+          <StatCard label="Leave Taken" value={isApiDataMode ? `${annualUsed} days` : '8 days'} icon={CalendarCheck} color="green" />
+          <StatCard label="Pending Requests" value={isApiDataMode ? String(annualPending) : '1'} icon={CalendarClock} color="amber" />
+          <StatCard label="Appraisal Status" value={isApiDataMode ? `${appraisalProgress}% Complete` : 'In Progress'} icon={ClipboardCheck} color="purple" />
         </div>
       )}
 
@@ -142,45 +326,51 @@ export const DashboardPage: React.FC = () => {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {isManager ? (
             <>
-              <ModuleCard
-                title="Staff Records"
-                description="Central employee records and org structure"
-                icon={Users}
-                href="/employees"
-                color="blue"
-                stats={[
-                  { label: 'Active Employees', value: data.srms.active_employees },
-                  { label: 'Branches', value: data.srms.branches },
-                  { label: 'Departments', value: data.srms.departments },
-                  { label: 'New This Month', value: data.srms.new_hires_this_month },
-                ]}
-              />
-              <ModuleCard
-                title="Performance Appraisal"
-                description="Appraisal cycles, reviews, and feedback"
-                icon={ClipboardList}
-                href="/modules/appraisal"
-                color="purple"
-                stats={[
-                  { label: 'Active Cycles', value: data.appraisal.active_cycles },
-                  { label: 'Completion Rate', value: `${data.appraisal.completion_rate}%` },
-                  { label: 'Pending Reviews', value: data.appraisal.pending_reviews },
-                  { label: 'Overdue', value: data.appraisal.overdue_reviews },
-                ]}
-              />
-              <ModuleCard
-                title="Leave Management"
-                description="Leave requests, approvals, and schedules"
-                icon={CalendarDays}
-                href="/modules/leave"
-                color="green"
-                stats={[
-                  { label: 'Total This Year', value: data.leave.total_leaves_this_year },
-                  { label: 'Approved', value: data.leave.approved_leaves },
-                  { label: 'Pending', value: data.leave.pending_leaves },
-                  { label: 'Utilization', value: `${data.leave.leave_utilization_rate}%` },
-                ]}
-              />
+              {hasSrms && (
+                <ModuleCard
+                  title="Staff Records"
+                  description="Central employee records and org structure"
+                  icon={Users}
+                  href="/employees"
+                  color="blue"
+                  stats={[
+                    { label: 'Active Employees', value: data.srms.active_employees },
+                    { label: 'Branches', value: data.srms.branches },
+                    { label: 'Departments', value: data.srms.departments },
+                    { label: 'New This Month', value: data.srms.new_hires_this_month },
+                  ]}
+                />
+              )}
+              {hasEappraisal && (
+                <ModuleCard
+                  title="Performance Appraisal"
+                  description="Appraisal cycles, reviews, and feedback"
+                  icon={ClipboardList}
+                  href="/modules/appraisal"
+                  color="purple"
+                  stats={[
+                    { label: 'Active Cycles', value: data.appraisal.active_cycles },
+                    { label: 'Completion Rate', value: `${data.appraisal.completion_rate}%` },
+                    { label: 'Pending Reviews', value: data.appraisal.pending_reviews },
+                    { label: 'Overdue', value: data.appraisal.overdue_reviews },
+                  ]}
+                />
+              )}
+              {hasEleave && (
+                <ModuleCard
+                  title="Leave Management"
+                  description="Leave requests, approvals, and schedules"
+                  icon={CalendarDays}
+                  href="/modules/leave"
+                  color="green"
+                  stats={[
+                    { label: 'Total This Year', value: data.leave.total_leaves_this_year },
+                    { label: 'Approved', value: data.leave.approved_leaves },
+                    { label: 'Pending', value: data.leave.pending_leaves },
+                    { label: 'Utilization', value: `${data.leave.leave_utilization_rate}%` },
+                  ]}
+                />
+              )}
             </>
           ) : (
             <>
@@ -192,40 +382,44 @@ export const DashboardPage: React.FC = () => {
                 color="blue"
                 linkLabel="View Profile"
                 stats={[
-                  { label: 'Department', value: 'Information Technology' },
-                  { label: 'Branch', value: 'Head Office' },
-                  { label: 'Staff ID', value: 'STF-001' },
-                  { label: 'Status', value: 'Active' },
+                  { label: 'Department', value: isApiDataMode ? employeeDepartment : 'Information Technology' },
+                  { label: 'Branch', value: isApiDataMode ? employeeBranch : 'Head Office' },
+                  { label: 'Staff ID', value: isApiDataMode ? employeeStaffId : 'STF-001' },
+                  { label: 'Status', value: isApiDataMode ? employeeStatus : 'Active' },
                 ]}
               />
-              <ModuleCard
-                title="My Appraisals"
-                description="View your performance reviews and feedback"
-                icon={Star}
-                href="/modules/appraisal"
-                color="purple"
-                linkLabel="View Appraisals"
-                stats={[
-                  { label: 'Current Cycle', value: '2025/2026' },
-                  { label: 'My Score', value: '3.9 / 5.0' },
-                  { label: 'Status', value: 'In Progress' },
-                  { label: 'Due Date', value: 'Mar 30' },
-                ]}
-              />
-              <ModuleCard
-                title="My Leave"
-                description="Apply for leave and track your leave history"
-                icon={CalendarPlus}
-                href="/modules/leave"
-                color="green"
-                linkLabel="Manage Leave"
-                stats={[
-                  { label: 'Annual Balance', value: '15 days' },
-                  { label: 'Used This Year', value: '8 days' },
-                  { label: 'Pending', value: '1 request' },
-                  { label: 'Sick Leave', value: '10 days' },
-                ]}
-              />
+              {hasEappraisal && (
+                <ModuleCard
+                  title="My Appraisals"
+                  description="View your performance reviews and feedback"
+                  icon={Star}
+                  href="/modules/appraisal"
+                  color="purple"
+                  linkLabel="View Appraisals"
+                  stats={[
+                    { label: 'Current Cycle', value: isApiDataMode ? String(appraisalData?.employee.current_cycle.title ?? 'Current Cycle') : '2025/2026' },
+                    { label: 'My Score', value: isApiDataMode ? String(appraisalData?.employee.past_appraisals?.[0]?.score ?? 'N/A') : '3.9 / 5.0' },
+                    { label: 'Status', value: isApiDataMode ? `${appraisalProgress}% Complete` : 'In Progress' },
+                    { label: 'Due Date', value: isApiDataMode ? String(appraisalData?.employee.current_cycle.due_date ?? 'N/A') : 'Mar 30' },
+                  ]}
+                />
+              )}
+              {hasEleave && (
+                <ModuleCard
+                  title="My Leave"
+                  description="Apply for leave and track your leave history"
+                  icon={CalendarPlus}
+                  href="/modules/leave"
+                  color="green"
+                  linkLabel="Manage Leave"
+                  stats={[
+                    { label: 'Annual Balance', value: isApiDataMode ? `${annualAvailable} days` : '15 days' },
+                    { label: 'Used This Year', value: isApiDataMode ? `${annualUsed} days` : '8 days' },
+                    { label: 'Pending', value: isApiDataMode ? `${annualPending} request(s)` : '1 request' },
+                    { label: 'Sick Leave', value: isApiDataMode ? `${Number(employeeBalances.find((b) => String(b.type).toLowerCase().includes('sick'))?.total ?? 0)} days` : '10 days' },
+                  ]}
+                />
+              )}
             </>
           )}
         </div>
@@ -251,7 +445,15 @@ export const DashboardPage: React.FC = () => {
             <div className="flex items-center justify-center">
               <ResponsiveContainer width="100%" height={250}>
                 <PieChart>
-                  <Pie data={leaveChartData} cx="50%" cy="50%" outerRadius={90} innerRadius={50} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>
+                  <Pie
+                    data={leaveChartData}
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={90}
+                    innerRadius={50}
+                    dataKey="value"
+                    label={({ name, percent }) => `${name} ${(((percent ?? 0) * 100)).toFixed(0)}%`}
+                  >
                     {leaveChartData.map((entry, i) => (
                       <Cell key={entry.name} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                     ))}

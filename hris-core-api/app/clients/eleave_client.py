@@ -1,25 +1,16 @@
 from typing import Any, Dict, Optional
 
-import httpx
-from fastapi import HTTPException
-
+from app.adapters.registry import get_eleave_adapter
 from app.core.settings import get_settings
 from app.models.tenant_mapping import TenantMapping
 
-settings = get_settings()
 
-
-def _get_http_client() -> httpx.Client:
-    return httpx.Client(timeout=settings.http_client_timeout_seconds)
-
-
-def _build_base_url(mapping: TenantMapping) -> str:
-    if not settings.eleave_domain_template or not mapping.eleave_subdomain:
-        raise HTTPException(status_code=404, detail="eLeave not configured for this tenant")
-    return settings.eleave_domain_template.format(subdomain=mapping.eleave_subdomain)
+def _settings():
+    return get_settings()
 
 
 def get_leave_summary(mapping: TenantMapping, token: Optional[str]) -> Dict[str, Any]:
+    settings = _settings()
     if settings.use_stub_data or not settings.eleave_domain_template:
         return {
             "total_leaves_this_year": 320,
@@ -30,24 +21,11 @@ def get_leave_summary(mapping: TenantMapping, token: Optional[str]) -> Dict[str,
             "leave_utilization_rate": 72.5,
         }
 
-    base_url = _build_base_url(mapping)
-    url = f"{base_url}/hris/leaves/summary"
-    headers: Dict[str, str] = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    with _get_http_client() as client:
-        response = client.get(url, headers=headers)
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Error calling eLeave: {exc}") from exc
-
-    return response.json()
+    return get_eleave_adapter().get_leave_summary(mapping, token)
 
 
 def get_employee_leave_history(mapping: TenantMapping, employee_id: str, token: Optional[str]) -> Dict[str, Any]:
+    settings = _settings()
     if settings.use_stub_data or not settings.eleave_domain_template:
         return {
             "employee_id": employee_id,
@@ -61,21 +39,4 @@ def get_employee_leave_history(mapping: TenantMapping, employee_id: str, token: 
             ],
         }
 
-    base_url = _build_base_url(mapping)
-    url = f"{base_url}/hris/employees/{employee_id}/leaves"
-    headers: Dict[str, str] = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    with _get_http_client() as client:
-        response = client.get(url, headers=headers)
-
-    if response.status_code == 404:
-        return {"employee_id": employee_id, "leaves": []}
-
-    try:
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Error calling eLeave: {exc}") from exc
-
-    return response.json()
+    return get_eleave_adapter().get_employee_leave_history(mapping, employee_id, token)
