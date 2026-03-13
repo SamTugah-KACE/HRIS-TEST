@@ -2,8 +2,8 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up --build
 #
 # This switches from dev auth (no login screen) to Keycloak SSO (login required).
-# After startup, open http://localhost:3000 and you will be redirected to Keycloak.
-# Log in with any of the seeded users (see README.md for credentials).
+# The portal serves the HRIS-native sign-in page and delegates SSO via core `/auth/sso/*`.
+# Log in with any seeded users (see README.md for credentials).
 
 services:
   hris-core-api:

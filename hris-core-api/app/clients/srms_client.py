@@ -187,3 +187,60 @@ def list_tenant_users(
             tenant_code=tenant_code,
         )
     return {"tenant_id": tenant_id, "users": [], "total": 0}
+
+
+def provision_tenant_user(
+    tenant_id: str,
+    token: Optional[str],
+    *,
+    email: str,
+    username: str,
+    first_name: str = "",
+    last_name: str = "",
+    user_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    tenant_slug: Optional[str] = None,
+    tenant_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    settings = _settings()
+    if settings.use_stub_data or settings.srms_base_url is None:
+        normalized_email = str(email or "").strip().lower()
+        normalized_username = str(username or "").strip().lower() or normalized_email
+        is_existing = normalized_email in {"employee@example.com", "manager@example.com"}
+        return {
+            "tenant_id": tenant_id,
+            "provisioned": not is_existing,
+            "user_id": user_id or f"stub-{normalized_username or 'user'}",
+            "email": normalized_email,
+            "username": normalized_username,
+            "message": "already exists" if is_existing else "created",
+            "raw": {
+                "provisioned": not is_existing,
+                "email": normalized_email,
+                "username": normalized_username,
+            },
+        }
+
+    adapter = get_srms_adapter()
+    if hasattr(adapter, "provision_tenant_user"):
+        return adapter.provision_tenant_user(  # type: ignore[attr-defined]
+            tenant_id,
+            token,
+            email=email,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            tenant_slug=tenant_slug,
+            tenant_code=tenant_code,
+        )
+    return {
+        "tenant_id": tenant_id,
+        "provisioned": False,
+        "user_id": user_id or "",
+        "email": str(email or "").strip().lower(),
+        "username": str(username or "").strip().lower(),
+        "message": "SRMS adapter does not support provision_tenant_user",
+        "raw": {},
+    }

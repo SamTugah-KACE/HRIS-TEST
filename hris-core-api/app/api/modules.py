@@ -2,6 +2,7 @@ from datetime import date
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi import HTTPException
@@ -211,6 +212,63 @@ def _has_rich_profile_fields(employee_payload: Dict[str, Any]) -> bool:
     return any(str(value or "").strip() for value in fields)
 
 
+def _merge_employee_sources(*sources: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge normalized employee payloads by taking the first non-empty value per field.
+    Source order is highest priority first.
+    """
+    keys = [
+        "employee_id",
+        "staff_id",
+        "full_name",
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "gender",
+        "organization",
+        "branch",
+        "department",
+        "unit",
+        "position",
+        "rank",
+        "employee_type",
+        "status",
+        "hire_date",
+    ]
+    merged: Dict[str, Any] = {}
+    for key in keys:
+        value = ""
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            candidate = source.get(key)
+            if str(candidate or "").strip():
+                value = candidate
+                break
+        merged[key] = value
+    return merged
+
+
+_HONORIFIC_CANONICAL = {
+    "mr": "Mr.",
+    "mrs": "Mrs.",
+    "ms": "Ms.",
+    "miss": "Miss",
+    "dr": "Dr.",
+    "prof": "Prof.",
+    "phd": "PhD.",
+}
+
+
+def _normalize_honorific(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = "".join(ch for ch in raw.lower() if ch.isalnum())
+    return _HONORIFIC_CANONICAL.get(compact, "")
+
+
 def _safe_float(value: Any) -> Optional[float]:
     try:
         if value is None or value == "":
@@ -218,6 +276,23 @@ def _safe_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_uuid(value: Any) -> bool:
+    try:
+        UUID(str(value or "").strip())
+        return True
+    except Exception:
+        return False
 
 
 def _compute_trend_message(appraisals: List[Dict[str, Any]]) -> str:
@@ -363,12 +438,8 @@ def get_my_profile(
 
     mapping = get_tenant_mapping(user.tenant_id)
     _ensure_module_ready(mapping, "srms")
-    canonical_identity = resolve_canonical_identity(user)
     if employee_id:
         enforce_self_or_privileged(user, employee_id, context="Profile lookup")
-    resolved_employee_id = employee_id or canonical_identity.srms.employee_id
-    if settings.eappraisal_fixture_file:
-        resolved_employee_id = settings.eappraisal_fixture_employee_id
     self_profile_payload = _safe_get(
         lambda: srms_client.get_self_employee_comprehensive(mapping, user.raw_token),
         {},
@@ -405,41 +476,82 @@ def get_my_profile(
                 break
             if not best_search_row:
                 best_search_row = row
+    self_employee_id = str(
+        self_profile_payload.get("id")
+        or (self_profile_payload.get("profile", {}) if isinstance(self_profile_payload.get("profile"), dict) else {}).get("employee_id")
+        or ""
+    ).strip()
+    search_employee_id = str(
+        best_search_row.get("employee_id") if isinstance(best_search_row, dict) else ""
+    ).strip()
+    # Keep SRMS identity authoritative for profile lookups to avoid cross-module ID drift.
+    resolved_employee_id = str(employee_id or self_employee_id or search_employee_id or "").strip()
+    if settings.eappraisal_fixture_file:
+        resolved_employee_id = settings.eappraisal_fixture_employee_id
     preferred_fallback = employee_from_self if _has_rich_profile_fields(employee_from_self) else best_search_row
-    employee = _safe_get(
-        lambda: srms_client.get_employee(mapping, str(resolved_employee_id), user.raw_token),
-        preferred_fallback or {
-            "full_name": user.username,
-            "staff_id": "",
-            "email": user.email or "",
-            "phone": "",
-            "gender": "",
-            "organization": "",
-            "branch": "",
-            "department": "",
-            "unit": "",
-            "position": "",
-            "rank": "",
-            "employee_type": "",
-            "status": "",
-            "hire_date": "",
-        },
-        module_name="srms.profile_employee",
-        tenant_id=user.tenant_id,
-        correlation_id=correlation_id,
-    )
+    employee_detail_fallback = _merge_employee_sources(
+        preferred_fallback if isinstance(preferred_fallback, dict) else {},
+        best_search_row if isinstance(best_search_row, dict) else {},
+        employee_from_self if isinstance(employee_from_self, dict) else {},
+    ) or {
+        "full_name": user.username,
+        "staff_id": "",
+        "email": user.email or "",
+        "phone": "",
+        "gender": "",
+        "organization": "",
+        "branch": "",
+        "department": "",
+        "unit": "",
+        "position": "",
+        "rank": "",
+        "employee_type": "",
+        "status": "",
+        "hire_date": "",
+    }
+    if resolved_employee_id and _is_uuid(resolved_employee_id):
+        employee_from_detail = _safe_get(
+            lambda: srms_client.get_employee(mapping, str(resolved_employee_id), user.raw_token),
+            employee_detail_fallback,
+            module_name="srms.profile_employee",
+            tenant_id=user.tenant_id,
+            correlation_id=correlation_id,
+        )
+        employee = _merge_employee_sources(
+            employee_from_detail if isinstance(employee_from_detail, dict) else {},
+            employee_detail_fallback,
+        )
+    else:
+        employee = employee_detail_fallback
 
-    full_name = str(employee.get("full_name", user.username))
+    fallback_full_name = str(
+        user.token_claims.get("name")
+        or " ".join(
+            [
+                str(user.token_claims.get("given_name") or "").strip(),
+                str(user.token_claims.get("family_name") or "").strip(),
+            ]
+        ).strip()
+        or user.username
+    ).strip()
+    full_name = str(employee.get("full_name") or fallback_full_name).strip()
     parts = [p for p in full_name.split(" ") if p]
     first_name = parts[0] if parts else user.username
     last_name = parts[-1] if len(parts) > 1 else ""
     other_names = " ".join(parts[1:-1]) if len(parts) > 2 else ""
+    resolved_title = (
+        _normalize_honorific(self_profile_payload.get("title"))
+        or _normalize_honorific(employee.get("position"))
+    )
+    raw_position = str(employee.get("position") or "").strip()
+    position_value = "" if _normalize_honorific(raw_position) else raw_position
 
     return {
         "profile": {
             "firstName": first_name,
             "lastName": last_name,
             "otherNames": other_names,
+            "title": resolved_title,
             "staffId": employee.get("staff_id", ""),
             "email": employee.get("email", user.email or ""),
             "phone": employee.get("phone", ""),
@@ -459,7 +571,7 @@ def get_my_profile(
             "branch": employee.get("branch", ""),
             "department": employee.get("department", ""),
             "unit": employee.get("unit", ""),
-            "position": employee.get("position", ""),
+            "position": position_value,
             "rank": employee.get("rank", ""),
             "employeeType": employee.get("employee_type", ""),
             "hireDate": employee.get("hire_date", ""),
@@ -532,7 +644,7 @@ def get_appraisal_module_data(
     canonical_identity = resolve_canonical_identity(user)
     if employee_id:
         enforce_self_or_privileged(user, employee_id, context="Appraisal module lookup")
-    resolved_employee_id = employee_id or canonical_identity.eappraisal.employee_id
+    resolved_employee_id = str(employee_id or canonical_identity.eappraisal.employee_id or "").strip()
     summary = _safe_get(
         lambda: eappraisal_client.get_appraisal_summary(mapping, user.raw_token),
         {
@@ -547,12 +659,16 @@ def get_appraisal_module_data(
         tenant_id=user.tenant_id,
         correlation_id=correlation_id,
     )
-    employee_appraisals = _safe_get(
-        lambda: eappraisal_client.get_employee_appraisals(mapping, str(resolved_employee_id), user.raw_token),
-        {"appraisals": []},
-        module_name="eappraisal.employee_appraisals",
-        tenant_id=user.tenant_id,
-        correlation_id=correlation_id,
+    employee_appraisals = (
+        _safe_get(
+            lambda: eappraisal_client.get_employee_appraisals(mapping, resolved_employee_id, user.raw_token),
+            {"appraisals": []},
+            module_name="eappraisal.employee_appraisals",
+            tenant_id=user.tenant_id,
+            correlation_id=correlation_id,
+        )
+        if resolved_employee_id
+        else {"appraisals": []}
     )
     my_appraisal = _safe_get(
         lambda: eappraisal_client.get_my_appraisals(mapping, user.raw_token),
@@ -631,9 +747,11 @@ def get_appraisal_history_detail(
     canonical_identity = resolve_canonical_identity(user)
     if employee_id:
         enforce_self_or_privileged(user, employee_id, context="Appraisal history lookup")
-    resolved_employee_id = employee_id or canonical_identity.eappraisal.employee_id
+    resolved_employee_id = str(employee_id or canonical_identity.eappraisal.employee_id or "").strip()
+    if not resolved_employee_id:
+        raise HTTPException(status_code=422, detail="Unable to resolve appraisal employee identity")
     employee_appraisals = _safe_get(
-        lambda: eappraisal_client.get_employee_appraisals(mapping, str(resolved_employee_id), user.raw_token),
+        lambda: eappraisal_client.get_employee_appraisals(mapping, resolved_employee_id, user.raw_token),
         {"appraisals": []},
         module_name="eappraisal.history_lookup",
         tenant_id=user.tenant_id,
@@ -701,7 +819,7 @@ def get_leave_module_data(
     canonical_identity = resolve_canonical_identity(user)
     if employee_id:
         enforce_self_or_privileged(user, employee_id, context="Leave module lookup")
-    resolved_employee_id = employee_id or canonical_identity.eleave.employee_id
+    resolved_employee_id = str(employee_id or canonical_identity.eleave.employee_id or "").strip()
     summary = _safe_get(
         lambda: eleave_client.get_leave_summary(mapping, user.raw_token),
         {
@@ -716,18 +834,22 @@ def get_leave_module_data(
         tenant_id=user.tenant_id,
         correlation_id=correlation_id,
     )
-    leave_history = _safe_get(
-        lambda: eleave_client.get_employee_leave_history(mapping, str(resolved_employee_id), user.raw_token),
-        {"leaves": [], "balance": {}, "used": {}},
-        module_name="eleave.employee_history",
-        tenant_id=user.tenant_id,
-        correlation_id=correlation_id,
+    leave_history = (
+        _safe_get(
+            lambda: eleave_client.get_employee_leave_history(mapping, resolved_employee_id, user.raw_token),
+            {"leaves": [], "balance": {}, "used": {}},
+            module_name="eleave.employee_history",
+            tenant_id=user.tenant_id,
+            correlation_id=correlation_id,
+        )
+        if resolved_employee_id
+        else {"leaves": [], "balance": {}, "used": {}}
     )
 
     raw_history: List[Dict[str, Any]] = leave_history.get("leaves", [])
     normalized_history = [
         {
-            "id": f"L{i + 1:03d}",
+            "id": str(item.get("id") or item.get("leave_id") or item.get("request_id") or f"L{i + 1:03d}"),
             "type": item.get("type", ""),
             "days": item.get("days", 0),
             "startDate": item.get("start_date", ""),
@@ -751,8 +873,8 @@ def get_leave_module_data(
     normalized_balances = [
         {
             "type": f"{name.title()} Leave" if name != "compassionate" else "Compassionate",
-            "total": int(total_days),
-            "used": int(used.get(name, 0)),
+            "total": _safe_int(total_days),
+            "used": _safe_int(used.get(name, 0)),
             "pending": 0,
             "color": balance_colors.get(name, "bg-gray-500"),
         }

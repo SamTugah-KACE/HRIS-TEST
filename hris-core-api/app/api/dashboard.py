@@ -61,6 +61,50 @@ def get_dashboard_summary(
             tenant_id=user.tenant_id,
             correlation_id=correlation_id,
         )
+        if _to_int_safe(srms_summary.get("total_employees"), 0) <= 0:
+            # SRMS dashboard summary may be unavailable for some tenants while roster is healthy.
+            # Derive stable counts from the roster to avoid misleading zero cards.
+            roster_payload = _safe_get(
+                lambda: srms_client.list_employees(
+                    mapping,
+                    user.raw_token,
+                    search="",
+                    department="",
+                    emp_status="all",
+                    page=1,
+                    page_size=1000,
+                ),
+                {"employees": [], "total": 0},
+                module_name="srms.roster_fallback",
+                tenant_id=user.tenant_id,
+                correlation_id=correlation_id,
+            )
+            rows = roster_payload.get("employees", []) if isinstance(roster_payload, dict) else []
+            rows = rows if isinstance(rows, list) else []
+            active = sum(
+                1
+                for row in rows
+                if str((row or {}).get("status") or "").strip().lower() == "active"
+            )
+            inactive = max(len(rows) - active, 0)
+            departments = {
+                str((row or {}).get("department") or "").strip().lower()
+                for row in rows
+                if str((row or {}).get("department") or "").strip()
+            }
+            branches = {
+                str((row or {}).get("branch") or "").strip().lower()
+                for row in rows
+                if str((row or {}).get("branch") or "").strip()
+            }
+            srms_summary["total_employees"] = max(
+                _to_int_safe(roster_payload.get("total") if isinstance(roster_payload, dict) else 0, len(rows)),
+                len(rows),
+            )
+            srms_summary["active_employees"] = active
+            srms_summary["inactive_employees"] = inactive
+            srms_summary["departments"] = len(departments)
+            srms_summary["branches"] = len(branches)
 
     appraisal_summary = {
         "active_cycles": 0,

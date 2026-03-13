@@ -139,6 +139,22 @@ def _normalized_roles(default_role: str, roles: Optional[List[str]]) -> List[str
     return filtered or ["hris:employee"]
 
 
+def _should_issue_temp_password(
+    *,
+    send_temp_password: bool,
+    user_status: str,
+    force_temp_password: bool,
+    allow_existing_user_reset: bool,
+) -> bool:
+    if not send_temp_password:
+        return False
+    if force_temp_password:
+        return True
+    if str(user_status).strip().lower() == "created":
+        return True
+    return bool(allow_existing_user_reset)
+
+
 def _assign_realm_roles(
     *,
     client: httpx.Client,
@@ -185,6 +201,8 @@ def ensure_user_and_temp_password(
     default_role: str = "hris:employee",
     roles: Optional[List[str]] = None,
     force_temp_password: bool = False,
+    allow_existing_user_password_reset: bool = False,
+    send_temp_password: Optional[bool] = None,
 ) -> Dict[str, Optional[str]]:
     settings = get_settings()
     if not settings.keycloak_issuer:
@@ -195,7 +213,11 @@ def ensure_user_and_temp_password(
     if not base or not realm:
         return {"status": "skipped", "reason": "keycloak_admin_resolution_failed", "user_id": None, "temporary_password": None}
 
-    send_temp_password = bool(settings.onboarding_send_temp_password_email or force_temp_password)
+    send_temp_password_effective = bool(
+        send_temp_password
+        if send_temp_password is not None
+        else (settings.onboarding_send_temp_password_email or force_temp_password)
+    )
     target_email = str(email or "").strip().lower()
     target_username = str(username or target_email).strip().lower()
     if not target_email:
@@ -260,7 +282,13 @@ def ensure_user_and_temp_password(
                 )
 
         temporary_password = None
-        if send_temp_password and user_id:
+        should_set_temp_password = _should_issue_temp_password(
+            send_temp_password=send_temp_password_effective,
+            user_status=status,
+            force_temp_password=force_temp_password,
+            allow_existing_user_reset=allow_existing_user_password_reset,
+        )
+        if should_set_temp_password and user_id:
             temporary_password = _generate_temp_password(settings.onboarding_temp_password_length)
             reset_url = f"{users_url}/{user_id}/reset-password"
             reset_payload = {"type": "password", "value": temporary_password, "temporary": True}
@@ -272,4 +300,5 @@ def ensure_user_and_temp_password(
             "reason": None,
             "user_id": user_id,
             "temporary_password": temporary_password,
+            "password_reset_applied": "true" if bool(temporary_password) else "false",
         }

@@ -284,7 +284,8 @@ A comprehensive 5-tab employee self-service profile:
 - Team Progress panel: each team member with avatar, sections completed, score or "In Progress"
 - Recent Activity panel: staff submissions, completions, change requests with timestamps
 - Batch Actions: Send Reminders, Generate Report, Export Data buttons
-- Open eAppraisal deep-link button
+- HRIS-native-first flow badges (`native`, `native-readonly`) for clear employee/manager context
+- `Open legacy eAppraisal` button is fallback-only (`legacy-fallback`) for unsupported workflows
 
 **Employee view:**
 - Current Cycle card with gradient header showing cycle name, due date, and overall progress percentage with animated progress bar
@@ -299,6 +300,7 @@ A comprehensive 5-tab employee self-service profile:
   - Add Goal button
 - General Comment textarea with Save Comment button
 - Past Appraisals history (3 previous cycles with scores, ratings, dates)
+- Past appraisal entries support read-only drilldown via Core API history endpoint
 - Performance trend insight ("Your performance trend is improving")
 
 ### 3.9 Leave Page (/modules/leave)
@@ -311,7 +313,8 @@ A comprehensive 5-tab employee self-service profile:
   - View details button
   - Export and Remind All buttons in header
 - Quick Reports section (Utilization Report, Leave Calendar, Export All Data)
-- Open eLeave deep-link button
+- HRIS-native-first flow badges with fallback marker (`legacy-fallback`)
+- Legacy eLeave button is fallback-only for missing features
 
 **Employee view:**
 - Apply for Leave button opens multi-step Leave Application Modal
@@ -319,7 +322,7 @@ A comprehensive 5-tab employee self-service profile:
 - Leave History table: clickable rows with type, days, period, and status badges
 - Export leave history button
 - Upcoming Public Holidays panel (Independence Day, Good Friday, Easter Monday, May Day, Eid al-Fitr)
-- Open eLeave deep-link button
+- Optional legacy eLeave link (fallback only)
 
 ### 3.10 Leave Application Modal
 
@@ -376,12 +379,21 @@ Lists seeded tenants with their codes, names, and module enablement status (SRMS
 
 - Docker Desktop (with Docker Compose v2)
 - Ports 3000, 5432, 8000, 8001, 8080 available
+- Optional: create `.env.docker.prod-like` from `.env.docker.prod-like.example` for production-like keycloak mode
 
 ### Option A: Dev Mode (fastest, no login screen)
 
 ```bash
 docker compose up --build -d
 ```
+
+Or use the staged startup helper (PowerShell, Windows):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1
+```
+
+The helper now performs Docker preflight checks, validates compose configuration before startup, and waits for health endpoints (`tenant-registry`, `hris-core-api`, `portal`) before completing.
 
 Wait about 60 seconds for all services to start, then open:
 
@@ -400,14 +412,31 @@ In dev mode, the portal auto-authenticates as hr.manager. Use the **Role Switche
 docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up --build -d
 ```
 
+Or use the staged startup helper with Keycloak mode:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1 -KeycloakMode
+```
+
+For production-like keycloak startup, copy and edit `.env.docker.prod-like.example` first, then run:
+
+```powershell
+Copy-Item .env.docker.prod-like.example .env.docker.prod-like
+powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1 -KeycloakMode
+```
+
+The helper auto-loads `.env.docker.prod-like` by default (override with `-EnvFile` or skip with `-SkipEnvFile`).
+
 Wait about 90 seconds (Keycloak takes longer to import the realm), then open:
 
 | Service | URL |
 |---------|-----|
-| Portal | http://localhost:3000 (redirects to Keycloak login) |
+| Portal | http://localhost:3000 (HRIS-native sign-in page; no direct Keycloak UI redirect) |
 | Keycloak Admin | http://localhost:8080/admin (admin / admin) |
 
-Log in with any of the seeded credentials listed in Section 6.
+Log in on the HRIS sign-in page with any seeded Keycloak credentials listed in Section 6.
+
+Important: in `AUTH_MODE=keycloak`, HRIS Core requires either `AUTH_STATE_SECRET` (recommended) or `KEYCLOAK_CLIENT_SECRET_PORTAL`. This is already wired in the updated compose defaults, and should be replaced with strong secrets for non-dev environments.
 
 ### Useful Docker Commands
 
@@ -516,6 +545,25 @@ Open two terminals:
 |----------|---------|-----|
 | 1 | `cd hris-core-api && python -m uvicorn app.main:app --reload --port 8000` | http://localhost:8000 |
 | 2 | `cd portal && npm run dev` | http://localhost:5173 |
+
+Recommended one-command local startup (PowerShell, Windows):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-local-stack.ps1
+```
+
+This command starts services in safe order with health gates:
+1) Tenant Registry (auto-bootstraps DB on first run),
+2) HRIS Core API,
+3) Portal.
+
+Cross-platform one-command local startup (Windows/macOS/Linux):
+
+```bash
+python scripts/start_local_stack.py --registry-port 8001 --core-port 8000 --portal-port 5173 --timeout 300 --auto-registry-port-fallback
+```
+
+This avoids shell-specific operators (`&&`) and runs all services in one terminal with prefixed logs; the script also auto-selects a fallback tenant-registry port when requested.
 
 ---
 
@@ -648,7 +696,7 @@ Higher roles inherit all views available to lower roles.
 
 ### How Authorization Works
 
-1. **Authentication**: User logs in via Keycloak. Token includes `tenant_id` and `roles` claims.
+1. **Authentication**: User signs in from HRIS-native login UI. HRIS Core runs OIDC Authorization Code + PKCE with Keycloak and stores tokens in secure HttpOnly cookies. Token includes `tenant_id` and `roles` claims.
 2. **HRIS Core API**: Extracts roles from token, resolves `effective_role` (highest role wins). In dev mode, reads `X-Debug-Roles` header from the portal.
 3. **Tenant resolution**: `tenant_id` is used to look up module-specific identifiers from the Tenant Registry.
 4. **Module calls**: The Core API forwards the Keycloak Bearer token to each production module. The module uses its own native RBAC for fine-grained authorization.
@@ -665,10 +713,19 @@ Interactive docs: http://localhost:8000/docs
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | /health | None | Health check |
+| GET | /auth/sso/start | None | Start OIDC Authorization Code + PKCE flow via Keycloak |
+| GET | /auth/sso/callback | None | Backend callback to exchange auth code and set secure session cookies |
+| GET | /auth/sso/session | Session cookie | Returns active authenticated user session |
+| POST | /auth/sso/refresh | Session cookie | Refreshes session cookies using Keycloak refresh token |
+| POST | /auth/sso/logout | Session cookie | Clears HRIS session cookies |
 | GET | /me | Required | Current user identity, tenant info, module enablement |
 | GET | /dashboard/summary | Required | Aggregated dashboard data from all modules plus role-specific quick actions |
 | GET | /employees | Required | Paginated employee list (search, department, status filters) |
 | GET | /employees/{id}/summary | Required | Employee 360: profile plus appraisals plus leave history |
+| GET | /modules/appraisal | Required | Appraisal manager + employee payload for HRIS-native pages |
+| GET | /modules/appraisal/history/{entry_id} | Required | Read-only appraisal history drilldown detail |
+| GET | /modules/leave | Required | Leave manager + employee payload for HRIS-native pages |
+| GET | /debug/integrations/eappraisal | Dev-gated | eAppraisal integration diagnostics with safe actionable status |
 
 **Query parameters for /employees:**
 
@@ -772,7 +829,7 @@ Set AUTH_MODE=keycloak and USE_STUB_DATA=false, then configure:
 ```
 KEYCLOAK_ISSUER=https://auth.hris.example.com/realms/hris-platform
 KEYCLOAK_JWKS_URL=https://auth.hris.example.com/realms/hris-platform/protocol/openid-connect/certs
-KEYCLOAK_AUDIENCE_HRIS_CORE=hris-core-api
+KEYCLOAK_AUDIENCE_HRIS_CORE=hris-core-api,hris-portal
 TENANT_REGISTRY_BASE_URL=http://tenant-registry:8000
 SRMS_BASE_URL=https://srms.example.com
 EAPPRAISAL_DOMAIN_TEMPLATE=https://appraisal.{subdomain}.example.com
@@ -788,10 +845,9 @@ ELEAVE_DOMAIN_TEMPLATE=https://{subdomain}.eleave.example.com
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
 | VITE_HRIS_CORE_API_BASE_URL | Yes | - | URL of the HRIS Core API |
-| VITE_AUTH_MODE | Yes | dev | `dev` (no login, with role switcher) or `keycloak` (SSO) |
-| VITE_KEYCLOAK_URL | If keycloak | - | Keycloak server URL |
-| VITE_KEYCLOAK_REALM | If keycloak | - | Keycloak realm name |
-| VITE_KEYCLOAK_CLIENT_ID | If keycloak | - | Keycloak client ID |
+| VITE_AUTH_MODE | Yes | dev | `dev` (no login, with role switcher) or `keycloak` (HRIS-native sign-in with backend-managed SSO session) |
+| VITE_PORTAL_DATA_MODE | No | mock | `mock` (hardcoded UI datasets) or `api` (strictly API-driven pages) |
+| VITE_DEV_REQUIRE_LOGIN | No | false | In `dev` mode, show native HRIS sign-in before local role-based login when `true` |
 
 ### HRIS Core API (hris-core-api/.env)
 
@@ -802,15 +858,41 @@ ELEAVE_DOMAIN_TEMPLATE=https://{subdomain}.eleave.example.com
 | DEV_DEFAULT_TENANT_ID | If dev | - | Tenant ID for dev user |
 | DEV_DEFAULT_USERNAME | If dev | - | Username for dev user |
 | DEV_DEFAULT_ROLES | If dev | hris:hr_manager | Comma-separated HRIS roles (overridden by X-Debug-Roles header) |
+| DEV_DEFAULT_EMPLOYEE_ID | If dev | e001 | Default employee identifier for self-service endpoints in dev mode |
 | KEYCLOAK_ISSUER | If keycloak | - | Keycloak issuer URL |
 | KEYCLOAK_JWKS_URL | If keycloak | - | Keycloak JWKS endpoint |
-| KEYCLOAK_AUDIENCE_HRIS_CORE | If keycloak | - | Expected aud claim |
+| KEYCLOAK_AUDIENCE_HRIS_CORE | If keycloak | - | Expected aud claim(s), comma-separated (e.g., `hris-core-api,hris-portal`) |
+| KEYCLOAK_TOKEN_URL | No | derived from issuer | Optional explicit Keycloak token endpoint for HRIS-native login proxy |
+| KEYCLOAK_AUTHORIZE_URL | No | derived from issuer | Optional explicit Keycloak authorization endpoint |
+| KEYCLOAK_END_SESSION_URL | No | - | Optional explicit Keycloak logout endpoint |
+| KEYCLOAK_CLIENT_ID_PORTAL | No | hris-portal | Keycloak client ID used by HRIS-native login proxy |
+| KEYCLOAK_CLIENT_SECRET_PORTAL | No | - | Optional secret for confidential Keycloak clients |
+| PORTAL_BASE_URL | No | http://localhost:5173 | Portal URL used for post-login callback redirect |
+| CORS_ALLOWED_ORIGINS | No | localhost UI origins | Comma-separated allowed origins for credentialed CORS |
+| AUTH_COOKIE_SECURE | No | false | Set true in HTTPS production so auth cookies are secure-only |
 | TENANT_REGISTRY_BASE_URL | Yes | http://localhost:8001 | Tenant Registry URL |
 | TENANT_REGISTRY_BASIC_AUTH_USERNAME | Yes | hris_internal | Basic auth username |
 | TENANT_REGISTRY_BASIC_AUTH_PASSWORD | Yes | change-me | Basic auth password |
 | SRMS_BASE_URL | If not stub | - | SRMS production URL |
+| SRMS_SERVICE_TOKEN | No | - | Optional SRMS service token fallback when user token passthrough is unavailable |
+| SRMS_APP_TYPE | No | - | Optional `X-App-Type` header for SRMS app-context enforcement |
+| SRMS_SESSION_TOKEN | No | - | Optional `X-Session-Token` for SRMS source-validation/session-token encryption flows |
+| SRMS_AUTO_SESSION_TOKEN | No | true | Auto-fetch/refresh SRMS session token via `/api/auth/session-token` when needed |
+| SRMS_EXTRA_HEADERS_JSON | No | - | Optional JSON object of additional SRMS request headers |
+| SRMS_PAYLOAD_SECURITY_MODE | No | auto | `auto`, `plain`, `encrypted_envelope`, or `staff_records_response` for SRMS payload protection handling |
+| SRMS_PAYLOAD_SIGNING_SECRET | No | - | Required for `encrypted_envelope`; validates SRMS response HMAC signature |
+| SRMS_PAYLOAD_ENCRYPTION_SECRET | No | - | Required for `staff_records_response`; decrypts SRMS `encrypted/data/checksum` response wrappers |
 | EAPPRAISAL_DOMAIN_TEMPLATE | If not stub | - | eAppraisal URL template |
+| EAPPRAISAL_SERVICE_TOKEN | No | - | Optional eAppraisal service token fallback |
+| EAPPRAISAL_REFRESH_TOKEN | No | - | Optional refresh token for auto-recovery of eAppraisal access token |
+| EAPPRAISAL_AUTO_REFRESH | No | true | Auto refresh + retry on eAppraisal 401 responses |
+| EAPPRAISAL_SUBDOMAIN_HEADER | No | - | Explicit eAppraisal subdomain header override |
+| EAPPRAISAL_COOKIE | No | - | Optional cookie override for constrained auth flows |
 | ELEAVE_DOMAIN_TEMPLATE | If not stub | - | eLeave URL template |
+| ELEAVE_SERVICE_TOKEN | No | - | Optional eLeave service token fallback |
+| MODULE_ADAPTER_MODE | No | auto | `auto` (try `/hris` then module-native), `hris_contract`, or `module_native` |
+| ELEAVE_USE_TENANT_PATH | No | true | When true, adapter calls eLeave tenant-path endpoints like `/{tenant}/...` |
+| ENABLE_INTEGRATION_DEBUG_ENDPOINTS | No | false | Enables `/debug/integrations/*` diagnostics endpoints (dev-only gate) |
 | HTTP_CLIENT_TIMEOUT_SECONDS | No | 10 | Timeout for module API calls |
 
 ### Tenant Registry (tenant-registry-service/.env)
@@ -939,6 +1021,22 @@ HRIS-Platform/
 
 ---
 
+## Core Adapter Layer Documentation
+
+To run portal **API mode** against current production modules **without waiting for module-native `/hris/...` endpoints**, follow:
+
+- `docs/api-contracts/core-module-adapter-implementation-guide.md`
+
+That guide includes:
+
+- exact Core files/directories to implement (`app/adapters/*`, `module_auth`, `module_identity_map`)
+- endpoint mapping from current SRMS/eAppraisal/eLeave routes to Core DTOs
+- auth strategy for non-passthrough modules (Sanctum/internal JWT cases)
+- tenant + employee identity resolution pattern
+- phased rollout checklist for synchronization and safe production cutover
+
+---
+
 ## Workflow Summary
 
 ### Development Workflow
@@ -955,6 +1053,24 @@ HRIS-Platform/
 10. Test **Staff Records** bulk actions and **Reports** generation as a manager
 11. When ready for SSO testing, use Docker with the keycloak override
 12. Log in as different users to verify role-based views
+
+### Collaboration Branch Policy (Required)
+
+All collaborators must follow this branch workflow before writing code:
+
+1. Create a new feature branch from `main`.
+2. Immediately sync `main` into that branch before starting work (merge latest `main`).
+3. Do all changes in that branch only; do not work directly on `main`.
+4. Follow the same policy in `CONTRIBUTING.md` for pull-request expectations.
+
+Example:
+
+```bash
+git checkout main
+git pull origin main
+git checkout -b feat/<short-name>
+git merge main
+```
 
 ### Production Workflow
 
@@ -977,8 +1093,9 @@ HRIS-Platform/
 | Role Switcher not appearing | Verify `VITE_AUTH_MODE=dev` in `portal/.env`. Role Switcher only shows in dev mode. |
 | API returns 401 Unauthorized | In dev mode, ensure `AUTH_MODE=dev` in `hris-core-api/.env`. In keycloak mode, check token expiry. |
 | Role switch doesn't change backend data | Ensure `httpClient.ts` sends `X-Debug-Roles` header and the Core API reads it in `auth.py`. |
-| Docker containers fail to start | Run `docker compose down -v` for a clean start. Check port conflicts with `netstat -an`. |
-| Keycloak realm not imported | Wait 90+ seconds. Check Keycloak logs: `docker compose logs keycloak`. |
+| Docker containers fail to start | Use `powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1` so compose config is pre-validated; then run `docker compose down -v` for a clean start and check port conflicts with `netstat -an`. |
+| Keycloak mode exits during startup | Ensure `.env.docker.prod-like` exists and includes `HRIS_AUTH_STATE_SECRET` (or `HRIS_KEYCLOAK_CLIENT_SECRET_PORTAL`), then rerun with `-KeycloakMode`. |
+| Keycloak realm not imported | Wait 90+ seconds. Check Keycloak logs: `docker compose logs keycloak`; if needed, reset with `docker compose down -v` and start again. |
 | Employee sees Staff Records list | Verify the redirect guard in `EmployeeListPage.tsx` is active and the role resolved correctly. |
 | Profile page shows no data | This is expected in dev mode with stub data. The profile displays hardcoded mock data. |
 
@@ -997,3 +1114,43 @@ curl -H "X-Debug-Roles: hris:employee" -H "X-Debug-Username: employee" http://lo
 # View Tenant Registry data
 curl -u hris_internal:registry_secret http://localhost:8001/tenants
 ```
+
+### Automated Synchronization Checks
+
+Use the built-in Core sync checker and contract tests before pushes/deploys:
+
+```bash
+cd hris-core-api
+
+# Contract + endpoint checks (dev/stub mode)
+python scripts/sync_check.py
+
+# Route-mapping audit against modules/* codebases
+python scripts/module_contract_audit.py
+
+# Optional live probe (requires token + module env vars)
+python scripts/sync_check.py --live
+
+# Optional eAppraisal live diagnostics probe (requires ENABLE_INTEGRATION_DEBUG_ENDPOINTS=true)
+python scripts/sync_check.py --live-eappraisal
+
+# Strict release gate (runs both live probes)
+python scripts/sync_check.py --strict-live
+
+# Unit-style contract tests
+python -m unittest tests/test_sync_contracts.py -v
+```
+
+---
+
+## 13. System Design and Integration Delivery Docs
+
+For the comprehensive architecture, ERD, workflows, and module sync execution guide, see:
+
+- `docs/architecture/hris-system-design-erd-and-module-sync-playbook.md`
+
+Module implementation guides:
+
+- `docs/api-contracts/staff-records-integration-implementation-guide.md`
+- `docs/api-contracts/performance-appraisal-integration-implementation-guide.md`
+- `docs/api-contracts/eleave-integration-implementation-guide.md`

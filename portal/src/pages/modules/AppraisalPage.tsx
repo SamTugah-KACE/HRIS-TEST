@@ -11,9 +11,11 @@ import {
   getAppraisalHistoryDetail,
   getAppraisalModuleData,
   getEappraisalDiagnostics,
+  getModulesCatalog,
   type AppraisalModuleResponse,
 } from '../../api/hrisCoreClient';
 import { isApiDataMode } from '../../config/dataMode';
+import { getModuleModeHint } from '../../shared/moduleMode';
 
 const APPRAISAL_SECTIONS = [
   { name: 'Key Result Areas (KRA)', weight: 40, status: 'completed', score: 4.1, maxScore: 5 },
@@ -63,6 +65,8 @@ export const AppraisalPage: React.FC = () => {
   const [selectedHistory, setSelectedHistory] = useState<AppraisalModuleResponse['employee']['past_appraisals'][number] | null>(null);
   const [historyDetail, setHistoryDetail] = useState<Record<string, unknown> | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [dataSourceMode, setDataSourceMode] = useState<'native' | 'mock'>(isApiDataMode ? 'native' : 'mock');
+  const [readMode, setReadMode] = useState(isApiDataMode ? 'native-readonly' : 'mock');
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -100,6 +104,19 @@ export const AppraisalPage: React.FC = () => {
         setError(message);
       })
       .finally(() => { if (mounted) setLoading(false); });
+    getModulesCatalog()
+      .then((catalog) => {
+        if (!mounted) return;
+        const moduleRow = (catalog.modules || []).find((m) => String(m.id || '').toLowerCase() === 'eappraisal');
+        const mode = String(moduleRow?.capabilities?.read_mode || 'native-readonly').trim();
+        setDataSourceMode('native');
+        setReadMode(mode || 'native-readonly');
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setDataSourceMode(isApiDataMode ? 'native' : 'mock');
+        setReadMode(isApiDataMode ? 'native-readonly' : 'mock');
+      });
     return () => { mounted = false; };
   }, []);
 
@@ -164,11 +181,17 @@ export const AppraisalPage: React.FC = () => {
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-            native
+          <span
+            title={getModuleModeHint(dataSourceMode)}
+            className="cursor-help rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700"
+          >
+            {dataSourceMode}
           </span>
-          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
-            native-readonly
+          <span
+            title={getModuleModeHint(readMode)}
+            className="cursor-help rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700"
+          >
+            {readMode}
           </span>
         </div>
       </div>

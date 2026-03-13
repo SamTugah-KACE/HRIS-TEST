@@ -31,6 +31,8 @@ class _SignedStatePayload(BaseModel):
 
 class LogoutResponse(BaseModel):
     logout_url: Optional[str] = None
+    revoked: bool = False
+    revoke_error: Optional[str] = None
 
 
 def _resolve_authorize_url() -> str:
@@ -383,6 +385,88 @@ def _build_end_session_url(id_token_hint: Optional[str]) -> Optional[str]:
     return f"{str(settings.keycloak_end_session_url)}?{urlencode(query)}"
 
 
+def _resolve_revoke_url() -> Optional[str]:
+    settings = get_settings()
+    if settings.keycloak_token_url:
+        token_url = str(settings.keycloak_token_url).rstrip("/")
+        if token_url.endswith("/token"):
+            return f"{token_url[:-6]}/revoke"
+    if settings.keycloak_issuer:
+        return f"{str(settings.keycloak_issuer).rstrip('/')}/protocol/openid-connect/revoke"
+    return None
+
+
+def _resolve_backchannel_logout_url() -> Optional[str]:
+    settings = get_settings()
+    if settings.keycloak_end_session_url:
+        return str(settings.keycloak_end_session_url)
+    if settings.keycloak_issuer:
+        return f"{str(settings.keycloak_issuer).rstrip('/')}/protocol/openid-connect/logout"
+    return None
+
+
+def _revoke_keycloak_session_tokens(
+    *,
+    refresh_token: Optional[str],
+    access_token: Optional[str],
+    id_token_hint: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    settings = get_settings()
+    revoke_url = _resolve_revoke_url()
+    logout_url = _resolve_backchannel_logout_url()
+    if not revoke_url and not logout_url:
+        return False, "keycloak_revoke_endpoints_unavailable"
+
+    client_id = str(settings.keycloak_portal_client_id or "").strip()
+    if not client_id:
+        return False, "keycloak_client_id_not_configured"
+
+    payload_base = {"client_id": client_id}
+    if settings.keycloak_portal_client_secret:
+        payload_base["client_secret"] = str(settings.keycloak_portal_client_secret)
+
+    errors: list[str] = []
+    try:
+        with httpx.Client(timeout=settings.http_client_timeout_seconds) as client:
+            if revoke_url and refresh_token:
+                revoke_refresh = client.post(
+                    revoke_url,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={**payload_base, "token": refresh_token, "token_type_hint": "refresh_token"},
+                )
+                if revoke_refresh.status_code >= 400:
+                    errors.append(f"refresh_revoke_status_{revoke_refresh.status_code}")
+
+            if revoke_url and access_token:
+                revoke_access = client.post(
+                    revoke_url,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={**payload_base, "token": access_token, "token_type_hint": "access_token"},
+                )
+                if revoke_access.status_code >= 400:
+                    errors.append(f"access_revoke_status_{revoke_access.status_code}")
+
+            if logout_url and (refresh_token or id_token_hint):
+                logout_payload = dict(payload_base)
+                if refresh_token:
+                    logout_payload["refresh_token"] = refresh_token
+                if id_token_hint:
+                    logout_payload["id_token_hint"] = id_token_hint
+                backchannel = client.post(
+                    logout_url,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data=logout_payload,
+                )
+                if backchannel.status_code >= 400:
+                    errors.append(f"backchannel_logout_status_{backchannel.status_code}")
+    except httpx.HTTPError as exc:
+        errors.append(f"http_error:{exc.__class__.__name__}")
+
+    if errors:
+        return False, ";".join(errors)
+    return True, None
+
+
 def _build_portal_error_redirect(reason: str) -> str:
     settings = get_settings()
     safe_reason = quote(reason[:120], safe="")
@@ -392,13 +476,25 @@ def _build_portal_error_redirect(reason: str) -> str:
 @router.post("/logout")
 def sso_logout(request: Request):
     _require_csrf(request)
+    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    access_token = request.cookies.get(ACCESS_COOKIE_NAME)
+    id_token = request.cookies.get(ID_TOKEN_COOKIE_NAME)
     logout_url = _build_end_session_url(
-        id_token_hint=request.cookies.get(ID_TOKEN_COOKIE_NAME),
+        id_token_hint=id_token,
+    )
+    revoked, revoke_error = _revoke_keycloak_session_tokens(
+        refresh_token=refresh_token,
+        access_token=access_token,
+        id_token_hint=id_token,
     )
     response = Response(
         status_code=status.HTTP_200_OK,
         media_type="application/json",
-        content=LogoutResponse(logout_url=logout_url).model_dump_json(),
+        content=LogoutResponse(
+            logout_url=logout_url,
+            revoked=revoked,
+            revoke_error=revoke_error,
+        ).model_dump_json(),
     )
     _clear_auth_cookies(response)
     return response

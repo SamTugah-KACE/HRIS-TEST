@@ -5,8 +5,9 @@ import {
   Award, Clock, CheckCircle, AlertCircle, ChevronRight,
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { getMyProfile, type ProfileDataResponse } from '../api/hrisCoreClient';
+import { getModulesCatalog, getMyProfile, type ProfileDataResponse } from '../api/hrisCoreClient';
 import { isApiDataMode } from '../config/dataMode';
+import { getModuleModeHint } from '../shared/moduleMode';
 
 type TabId = 'personal' | 'employment' | 'qualifications' | 'emergency' | 'documents';
 
@@ -66,6 +67,12 @@ const DOCUMENTS = [
   { name: 'Passport Photo', type: 'JPEG', size: '560 KB', uploadedAt: '2024-03-15', category: 'Photo' },
 ];
 
+const isHonorific = (value: unknown): boolean => {
+  const raw = String(value ?? '').trim().toLowerCase();
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  return ['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'phd'].includes(compact);
+};
+
 function InfoRow({ icon: Icon, label, value, editable, editing }: {
   icon: React.FC<{ className?: string }>; label: string; value: string;
   editable?: boolean; editing?: boolean;
@@ -92,6 +99,8 @@ export const ProfilePage: React.FC = () => {
   const [apiData, setApiData] = useState<ProfileDataResponse | null>(null);
   const [loading, setLoading] = useState(isApiDataMode);
   const [error, setError] = useState<string | null>(null);
+  const [dataSourceMode, setDataSourceMode] = useState<'native' | 'mock'>(isApiDataMode ? 'native' : 'mock');
+  const [readMode, setReadMode] = useState('native-readonly');
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -117,6 +126,19 @@ export const ProfilePage: React.FC = () => {
       })
       .finally(() => {
         if (mounted) setLoading(false);
+      });
+    getModulesCatalog()
+      .then((catalog) => {
+        if (!mounted) return;
+        const srms = (catalog.modules || []).find((m) => String(m.id || '').toLowerCase() === 'srms');
+        const mode = String(srms?.capabilities?.read_mode || 'native-readonly').trim();
+        setDataSourceMode('native');
+        setReadMode(mode || 'native-readonly');
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setDataSourceMode('native');
+        setReadMode('native-readonly');
       });
     return () => {
       mounted = false;
@@ -147,7 +169,12 @@ export const ProfilePage: React.FC = () => {
     const documents = apiData.documents;
     const quickStats = apiData.quick_stats;
 
-    const fullName = [profile.firstName, profile.otherNames, profile.lastName].filter(Boolean).join(' ');
+    const fullNameCore = [profile.firstName, profile.otherNames, profile.lastName].filter(Boolean).join(' ');
+    const titleValue = String(profile.title ?? '').trim();
+    const fullName = [titleValue, fullNameCore].filter(Boolean).join(' ');
+    const normalizedPosition = isHonorific(employment.position) ? '' : String(employment.position ?? '').trim();
+    const subtitleLeft = normalizedPosition || String(employment.rank ?? '').trim() || String(employment.employeeType ?? '').trim() || 'Position not available';
+    const subtitleRight = String(employment.department ?? '').trim() || String(employment.unit ?? '').trim() || 'Department not available';
 
     return (
       <div className="space-y-6">
@@ -155,11 +182,21 @@ export const ProfilePage: React.FC = () => {
           <div className="bg-gradient-to-r from-brand-600 to-brand-700 px-6 py-8 text-white">
             <h1 className="text-2xl font-bold">{fullName || 'My Profile'}</h1>
             <p className="mt-1 text-sm text-white/80">
-              {(employment.position as string) || 'Position not available'} &middot; {(employment.department as string) || 'Department not available'}
+              {subtitleLeft} &middot; {subtitleRight}
             </p>
             <div className="mt-2 flex flex-wrap gap-2">
-              <span className="rounded-full bg-emerald-400/30 px-2.5 py-0.5 text-xs font-medium text-emerald-100">native</span>
-              <span className="rounded-full bg-blue-400/30 px-2.5 py-0.5 text-xs font-medium text-blue-100">native-readonly</span>
+              <span
+                title={getModuleModeHint(dataSourceMode)}
+                className="cursor-help rounded-full bg-emerald-400/30 px-2.5 py-0.5 text-xs font-medium text-emerald-100"
+              >
+                {dataSourceMode}
+              </span>
+              <span
+                title={getModuleModeHint(readMode)}
+                className="cursor-help rounded-full bg-blue-400/30 px-2.5 py-0.5 text-xs font-medium text-blue-100"
+              >
+                {readMode}
+              </span>
               <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-medium">{String(profile.staffId ?? 'N/A')}</span>
               <span className="rounded-full bg-emerald-400/30 px-2.5 py-0.5 text-xs font-medium text-emerald-100">{String(employment.status ?? 'N/A')}</span>
               <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-medium">{String(employment.branch ?? 'N/A')}</span>
@@ -187,6 +224,7 @@ export const ProfilePage: React.FC = () => {
           <div className="card">
             <h3 className="mb-3 text-sm font-semibold text-gray-900">Personal</h3>
             <dl className="space-y-2 text-sm">
+              <div><dt className="text-gray-500">Staff ID</dt><dd className="font-medium text-gray-900">{String(profile.staffId ?? 'N/A')}</dd></div>
               <div><dt className="text-gray-500">Email</dt><dd className="font-medium text-gray-900">{String(profile.email ?? 'N/A')}</dd></div>
               <div><dt className="text-gray-500">Phone</dt><dd className="font-medium text-gray-900">{String(profile.phone ?? 'N/A')}</dd></div>
               <div><dt className="text-gray-500">Gender</dt><dd className="font-medium text-gray-900">{String(profile.gender ?? 'N/A')}</dd></div>
@@ -196,8 +234,14 @@ export const ProfilePage: React.FC = () => {
             <h3 className="mb-3 text-sm font-semibold text-gray-900">Employment</h3>
             <dl className="space-y-2 text-sm">
               <div><dt className="text-gray-500">Organization</dt><dd className="font-medium text-gray-900">{String(employment.organization ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Branch</dt><dd className="font-medium text-gray-900">{String(employment.branch ?? 'N/A')}</dd></div>
               <div><dt className="text-gray-500">Department</dt><dd className="font-medium text-gray-900">{String(employment.department ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Unit</dt><dd className="font-medium text-gray-900">{String(employment.unit ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Position</dt><dd className="font-medium text-gray-900">{normalizedPosition || 'N/A'}</dd></div>
               <div><dt className="text-gray-500">Rank</dt><dd className="font-medium text-gray-900">{String(employment.rank ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Employee Type</dt><dd className="font-medium text-gray-900">{String(employment.employeeType ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Hire Date</dt><dd className="font-medium text-gray-900">{String(employment.hireDate ?? 'N/A')}</dd></div>
+              <div><dt className="text-gray-500">Status</dt><dd className="font-medium text-gray-900">{String(employment.status ?? 'N/A')}</dd></div>
             </dl>
           </div>
         </div>

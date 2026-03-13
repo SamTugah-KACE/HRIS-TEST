@@ -30,11 +30,14 @@ class HttpEappraisalAdapter(EappraisalAdapter):
 
     def _candidate_paths(self, hris_path: str, module_path: str) -> List[str]:
         mode = self.settings.module_adapter_mode.lower()
+        hris_candidates = [hris_path]
+        if hris_path.startswith("/api/hris/") and not hris_path.startswith("/api/hris/v1/"):
+            hris_candidates = [hris_path.replace("/api/hris/", "/api/hris/v1/", 1), hris_path]
         if mode == "hris_contract":
-            return [hris_path]
+            return hris_candidates
         if mode == "module_native":
             return [module_path]
-        return [hris_path, module_path]
+        return [*hris_candidates, module_path]
 
     def _build_base_url(self, mapping: TenantMapping) -> str:
         if not self.settings.eappraisal_domain_template or not mapping.eappraisal_subdomain:
@@ -302,6 +305,12 @@ class HttpEappraisalAdapter(EappraisalAdapter):
         ]
         return any(checks)
 
+    @staticmethod
+    def _has_identity_hints(identity: Dict[str, str], employee_id: str) -> bool:
+        if any(str(identity.get(key) or "").strip() for key in ("user_id", "email", "staff_id")):
+            return True
+        return bool(str(employee_id or "").strip())
+
     def get_appraisal_summary(self, mapping: TenantMapping, token: Optional[str]) -> Dict[str, Any]:
         fixture_cycles = self._load_fixture_cycles()
         if fixture_cycles:
@@ -430,10 +439,14 @@ class HttpEappraisalAdapter(EappraisalAdapter):
         if selected_path == "/api/appraisals/submissions":
             rows = ensure_list(payload, context="eAppraisal submissions")
             normalized = []
+            enforce_identity_filter = self._has_identity_hints(identity, employee_id)
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                if identity and not self._submission_matches_identity(row, identity, employee_id):
+                # Fail closed: never return broad submission payloads when identity context is unavailable.
+                if not enforce_identity_filter:
+                    continue
+                if not self._submission_matches_identity(row, identity, employee_id):
                     continue
                 status_text = to_str(row.get("status"))
                 appraisal = row.get("appraisal") if isinstance(row.get("appraisal"), dict) else {}

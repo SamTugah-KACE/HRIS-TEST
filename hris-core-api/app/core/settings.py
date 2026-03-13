@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     onboarding_dev_force_temp_password: bool = Field(
         False, alias="ONBOARDING_DEV_FORCE_TEMP_PASSWORD"
     )
+    expose_temporary_password_in_api: bool = Field(
+        False, alias="EXPOSE_TEMPORARY_PASSWORD_IN_API"
+    )
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "populate_by_name": True}
 

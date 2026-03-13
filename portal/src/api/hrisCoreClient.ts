@@ -304,6 +304,25 @@ export type TenantStorageProvidersResponse = {
   providers: Array<{ name: string; config?: Record<string, unknown> }>;
 };
 
+export type TenantUserPasswordResetResponse = {
+  reset_applied: boolean;
+  idempotency_key?: string | null;
+  idempotent_replay?: boolean;
+  target_email?: string;
+  target_username?: string;
+  temporary_password?: string | null;
+  password_reset_applied?: string;
+  reason?: string;
+};
+
+function unwrapEnvelopeData<T>(payload: unknown): T {
+  const maybeEnvelope = payload as { data?: T } | null;
+  if (maybeEnvelope && typeof maybeEnvelope === 'object' && 'data' in maybeEnvelope && maybeEnvelope.data) {
+    return maybeEnvelope.data;
+  }
+  return payload as T;
+}
+
 export const getIdentity = async (): Promise<UserIdentity> => {
   const r = await httpClient.get<UserIdentity>('/me');
   return r.data;
@@ -409,4 +428,15 @@ export const updateTenantStorageProviders = async (
 ): Promise<TenantStorageProvidersResponse> => {
   const r = await httpClient.put<TenantStorageProvidersResponse>(`/tenants/${encodeURIComponent(tenantId)}/storage/providers`, { providers });
   return r.data;
+};
+
+export const resetTenantUserPassword = async (
+  tenantId: string,
+  payload: { email?: string; username?: string; idempotency_key?: string; reason?: string }
+): Promise<TenantUserPasswordResetResponse> => {
+  const r = await httpClient.post(
+    `/integrations/synchronization/tenant/${encodeURIComponent(tenantId)}/users/password-reset`,
+    payload
+  );
+  return unwrapEnvelopeData<TenantUserPasswordResetResponse>(r.data);
 };

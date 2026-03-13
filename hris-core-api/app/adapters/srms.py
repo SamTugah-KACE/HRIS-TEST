@@ -5,6 +5,8 @@ import hmac
 import hashlib
 import base64
 import secrets
+import logging
+from uuid import uuid4
 from urllib.parse import urlparse
 
 import httpx
@@ -23,6 +25,8 @@ from app.clients.adapter_utils import (
 from app.core.settings import get_settings
 from app.models.tenant_mapping import TenantMapping
 from app.services import automation_store
+
+logger = logging.getLogger(__name__)
 
 
 class HttpSrmsAdapter(SrmsAdapter):
@@ -179,6 +183,7 @@ class HttpSrmsAdapter(SrmsAdapter):
         token_email = str(claims.get("email") or "").strip().lower()
         token_username = str(claims.get("preferred_username") or "").strip().lower()
         preferred_username = str(token_username or token_email or token_sub or "").strip()
+        resolved_module_user_id = ""
 
         tenant_id_value = str(tenant_id or "").strip()
         if tenant_id_value:
@@ -193,9 +198,8 @@ class HttpSrmsAdapter(SrmsAdapter):
             except Exception:
                 resolved = None
             if isinstance(resolved, dict):
-                mapped_username = str(
-                    resolved.get("module_username") or resolved.get("module_user_id") or ""
-                ).strip()
+                mapped_username = str(resolved.get("module_username") or "").strip()
+                resolved_module_user_id = str(resolved.get("module_user_id") or "").strip()
                 if mapped_username:
                     preferred_username = mapped_username
         if not preferred_username:
@@ -217,6 +221,7 @@ class HttpSrmsAdapter(SrmsAdapter):
             "preferred_username": preferred_username,
             "email": email,
             "module": "srms",
+            "module_user_id": resolved_module_user_id,
             "roles": [str(role) for role in roles],
             "iat": now_epoch,
             "exp": now_epoch + 900,
@@ -405,6 +410,91 @@ class HttpSrmsAdapter(SrmsAdapter):
             "phone": to_str(raw.get("phone") or raw.get("phone_number")),
             "gender": to_str(raw.get("gender")),
         }
+
+    @staticmethod
+    def _name_or_value(value: Any) -> str:
+        if isinstance(value, dict):
+            return to_str(value.get("name") or value.get("label") or value.get("title"))
+        return to_str(value)
+
+    def _list_native_employee_context(
+        self,
+        *,
+        mapping: TenantMapping,
+        token: Optional[str],
+        skip: int,
+        limit: int,
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Best-effort enrichment from module-native employee list that includes
+        department/unit/branch relational names.
+        """
+        context_by_employee_id: Dict[str, Dict[str, str]] = {}
+        if not self.settings.srms_base_url:
+            return context_by_employee_id
+
+        payload: Any = None
+        with self._get_http_client() as client:
+            session_token = self._session_token_from_config_or_cache()
+            if not session_token:
+                session_token = self._refresh_runtime_session_token(client)
+            header_candidates = self._auth_header_candidates(
+                token,
+                tenant_id=mapping.tenant_id,
+                tenant_slug=mapping.srms_slug,
+                tenant_code=mapping.code,
+            )
+            paths = ["/api/employees", "/api/employees/"]
+            params = {
+                "organization_id": mapping.tenant_id,
+                "skip": max(0, int(skip)),
+                "limit": max(1, min(int(limit), 1000)),
+            }
+            for headers in header_candidates:
+                if session_token:
+                    headers["X-Session-Token"] = session_token
+                try:
+                    payload, _ = get_json_from_candidate_paths(
+                        client=client,
+                        base_url=str(self.settings.srms_base_url),
+                        paths=paths,
+                        headers=headers,
+                        params=params,
+                        module_name="SRMS",
+                        payload_security_mode=self.settings.srms_payload_security_mode,
+                        payload_signing_secret=self.settings.srms_payload_signing_secret,
+                        payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                        payload_session_token=session_token,
+                        prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                            path=path,
+                            session_token=session_token,
+                            method="GET",
+                            base_headers=base_headers,
+                        ),
+                    )
+                    break
+                except HTTPException:
+                    continue
+
+        records: List[Dict[str, Any]] = []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("employees"), list):
+                records = [r for r in payload.get("employees", []) if isinstance(r, dict)]
+            elif isinstance(payload.get("data"), list):
+                records = [r for r in payload.get("data", []) if isinstance(r, dict)]
+        elif isinstance(payload, list):
+            records = [r for r in payload if isinstance(r, dict)]
+
+        for row in records:
+            employee_id = to_str(row.get("id") or row.get("employee_id")).strip()
+            if not employee_id:
+                continue
+            context_by_employee_id[employee_id] = {
+                "department": self._name_or_value(row.get("department")).strip(),
+                "branch": self._name_or_value(row.get("branch")).strip(),
+                "unit": self._name_or_value(row.get("unit")).strip(),
+            }
+        return context_by_employee_id
 
     def _extract_records(self, payload: Any) -> List[Dict[str, Any]]:
         if isinstance(payload, list):
@@ -617,6 +707,28 @@ class HttpSrmsAdapter(SrmsAdapter):
                     )
                     for r in records
                 ]
+                if employees and any(
+                    not str(emp.get("department") or "").strip() and not str(emp.get("branch") or "").strip()
+                    for emp in employees
+                ):
+                    native_context = self._list_native_employee_context(
+                        mapping=mapping,
+                        token=token,
+                        skip=(page - 1) * page_size,
+                        limit=page_size,
+                    )
+                    if native_context:
+                        for employee in employees:
+                            emp_id = str(employee.get("employee_id") or "").strip()
+                            context_row = native_context.get(emp_id)
+                            if not context_row:
+                                continue
+                            if not str(employee.get("department") or "").strip():
+                                employee["department"] = context_row.get("department", "")
+                            if not str(employee.get("branch") or "").strip():
+                                employee["branch"] = context_row.get("branch", "")
+                            if not str(employee.get("unit") or "").strip():
+                                employee["unit"] = context_row.get("unit", "")
                 total = to_int(payload.get("total", len(employees)), context="SRMS employees.total")
                 return {
                     "employees": employees,
@@ -638,6 +750,28 @@ class HttpSrmsAdapter(SrmsAdapter):
                 )
                 for r in payload
             ]
+            if employees and any(
+                not str(emp.get("department") or "").strip() and not str(emp.get("branch") or "").strip()
+                for emp in employees
+            ):
+                native_context = self._list_native_employee_context(
+                    mapping=mapping,
+                    token=token,
+                    skip=(page - 1) * page_size,
+                    limit=page_size,
+                )
+                if native_context:
+                    for employee in employees:
+                        emp_id = str(employee.get("employee_id") or "").strip()
+                        context_row = native_context.get(emp_id)
+                        if not context_row:
+                            continue
+                        if not str(employee.get("department") or "").strip():
+                            employee["department"] = context_row.get("department", "")
+                        if not str(employee.get("branch") or "").strip():
+                            employee["branch"] = context_row.get("branch", "")
+                        if not str(employee.get("unit") or "").strip():
+                            employee["unit"] = context_row.get("unit", "")
             total = len(employees)
             return {
                 "employees": employees,
@@ -653,40 +787,146 @@ class HttpSrmsAdapter(SrmsAdapter):
         if not self.settings.srms_base_url:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SRMS base URL is not configured")
 
-        headers = self._build_srms_headers(
-            user_token=token,
-            tenant_id=mapping.tenant_id,
-            tenant_slug=mapping.srms_slug,
-            tenant_code=mapping.code,
-        )
         paths = [
             "/api/hris/v1/employees/self/comprehensive",
+            "/api/hris/v1/employees/self/comprehensive/",
             "/api/hris/employees/self/comprehensive",
+            "/api/hris/employees/self/comprehensive/",
+            "/api/employees/self/comprehensive",
+            "/api/employees/self/comprehensive/",
         ]
 
+        payload: Any = None
+        last_exception: Optional[HTTPException] = None
+        attempts: List[Dict[str, Any]] = []
+        trace_id = uuid4().hex
+        logger.info(
+            "SRMS self-comprehensive request started",
+            extra={
+                "trace_id": trace_id,
+                "tenant_id": mapping.tenant_id,
+                "tenant_code": mapping.code,
+            },
+        )
         with self._get_http_client() as client:
             session_token = self._session_token_from_config_or_cache()
             if not session_token:
                 session_token = self._refresh_runtime_session_token(client)
+            for headers in self._auth_header_candidates(
+                token,
+                tenant_id=mapping.tenant_id,
+                tenant_slug=mapping.srms_slug,
+                tenant_code=mapping.code,
+            ):
                 if session_token:
                     headers["X-Session-Token"] = session_token
-            payload, _ = get_json_from_candidate_paths(
-                client=client,
-                base_url=str(self.settings.srms_base_url),
-                paths=paths,
-                headers=headers,
-                module_name="SRMS",
-                payload_security_mode=self.settings.srms_payload_security_mode,
-                payload_signing_secret=self.settings.srms_payload_signing_secret,
-                payload_encryption_secret=self.settings.srms_payload_encryption_secret,
-                payload_session_token=session_token,
-                prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
-                    path=path,
-                    session_token=session_token,
-                    method="GET",
-                    base_headers=base_headers,
-                ),
+                try:
+                    payload, selected_path = get_json_from_candidate_paths(
+                        client=client,
+                        base_url=str(self.settings.srms_base_url),
+                        paths=paths,
+                        headers=headers,
+                        module_name="SRMS",
+                        payload_security_mode=self.settings.srms_payload_security_mode,
+                        payload_signing_secret=self.settings.srms_payload_signing_secret,
+                        payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                        payload_session_token=session_token,
+                        prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                            path=path,
+                            session_token=session_token,
+                            method="GET",
+                            base_headers=base_headers,
+                        ),
+                    )
+                    logger.info(
+                        "SRMS self-comprehensive request succeeded",
+                        extra={
+                            "trace_id": trace_id,
+                            "tenant_id": mapping.tenant_id,
+                            "tenant_code": mapping.code,
+                            "selected_path": selected_path,
+                            "session_token_used": bool(session_token),
+                            "authorization_header_used": bool(headers.get("Authorization")),
+                            "attempts_before_success": len(attempts),
+                        },
+                    )
+                    break
+                except HTTPException as exc:
+                    last_exception = exc
+                    attempts.append(
+                        {
+                            "trace_id": trace_id,
+                            "attempt_number": len(attempts) + 1,
+                            "status_code": exc.status_code,
+                            "detail": str(exc.detail),
+                            "authorization_header_used": bool(headers.get("Authorization")),
+                            "session_token_used": bool(session_token),
+                        }
+                    )
+                    if exc.status_code == status.HTTP_502_BAD_GATEWAY and self.settings.srms_auto_session_token:
+                        refreshed = self._refresh_runtime_session_token(client)
+                        if refreshed:
+                            headers["X-Session-Token"] = refreshed
+                            try:
+                                payload, selected_path = get_json_from_candidate_paths(
+                                    client=client,
+                                    base_url=str(self.settings.srms_base_url),
+                                    paths=paths,
+                                    headers=headers,
+                                    module_name="SRMS",
+                                    payload_security_mode=self.settings.srms_payload_security_mode,
+                                    payload_signing_secret=self.settings.srms_payload_signing_secret,
+                                    payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                                    payload_session_token=refreshed,
+                                    prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                                        path=path,
+                                        session_token=refreshed,
+                                        method="GET",
+                                        base_headers=base_headers,
+                                    ),
+                                )
+                                session_token = refreshed
+                                logger.info(
+                                    "SRMS self-comprehensive request succeeded after session refresh",
+                                    extra={
+                                        "trace_id": trace_id,
+                                        "tenant_id": mapping.tenant_id,
+                                        "tenant_code": mapping.code,
+                                        "selected_path": selected_path,
+                                        "session_token_used": True,
+                                        "authorization_header_used": bool(headers.get("Authorization")),
+                                        "attempts_before_success": len(attempts),
+                                    },
+                                )
+                                break
+                            except HTTPException as refreshed_exc:
+                                last_exception = refreshed_exc
+                                attempts.append(
+                                    {
+                                        "trace_id": trace_id,
+                                        "attempt_number": len(attempts) + 1,
+                                        "status_code": refreshed_exc.status_code,
+                                        "detail": str(refreshed_exc.detail),
+                                        "authorization_header_used": bool(headers.get("Authorization")),
+                                        "session_token_used": True,
+                                    }
+                                )
+                    continue
+
+        if payload is None and last_exception is not None:
+            logger.warning(
+                "SRMS self-comprehensive request failed; profile fallback path will be used",
+                extra={
+                    "trace_id": trace_id,
+                    "tenant_id": mapping.tenant_id,
+                    "tenant_code": mapping.code,
+                    "attempt_count": len(attempts),
+                    "attempts": attempts[-5:],
+                    "last_status_code": last_exception.status_code,
+                    "last_detail": str(last_exception.detail),
+                },
             )
+            raise last_exception
 
         source = ensure_dict(payload, context="SRMS self comprehensive")
         if isinstance(source.get("data"), dict):
@@ -1171,4 +1411,155 @@ class HttpSrmsAdapter(SrmsAdapter):
             "tenant_url": to_str(payload_data.get("tenant_url") or payload.get("tenant_url") if isinstance(payload, dict) else ""),
             "users": normalized_users,
             "total": len(normalized_users),
+        }
+
+    def provision_tenant_user(
+        self,
+        tenant_id: str,
+        token: Optional[str],
+        *,
+        email: str,
+        username: str,
+        first_name: str = "",
+        last_name: str = "",
+        user_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        tenant_slug: Optional[str] = None,
+        tenant_code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.settings.srms_base_url:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SRMS base URL is not configured")
+        tenant_id_str = str(tenant_id or "").strip()
+        if not tenant_id_str:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="tenant_id is required")
+
+        email_value = str(email or "").strip().lower()
+        username_value = str(username or "").strip().lower()
+        if not email_value and not username_value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="email or username is required",
+            )
+
+        payload_body: Dict[str, Any] = {
+            "email": email_value,
+            "username": username_value or email_value,
+            "first_name": str(first_name or "").strip(),
+            "last_name": str(last_name or "").strip(),
+        }
+        if str(user_id or "").strip():
+            payload_body["user_id"] = str(user_id).strip()
+        if str(idempotency_key or "").strip():
+            payload_body["idempotency_key"] = str(idempotency_key).strip()
+
+        provision_paths = [
+            f"/api/hris/v1/integration/tenants/{tenant_id_str}/users/provision",
+            f"/api/hris/integration/tenants/{tenant_id_str}/users/provision",
+            f"/api/hris/v1/integrations/tenants/{tenant_id_str}/users/provision",
+            f"/api/hris/integrations/tenants/{tenant_id_str}/users/provision",
+        ]
+
+        response_payload: Any = None
+        last_exception: Optional[HTTPException] = None
+        with self._get_http_client() as client:
+            session_token = self._session_token_from_config_or_cache()
+            if not session_token:
+                session_token = self._refresh_runtime_session_token(client)
+            header_candidates = self._integration_header_candidates(
+                token,
+                tenant_id=tenant_id_str,
+                tenant_slug=tenant_slug,
+                tenant_code=tenant_code,
+            )
+            for headers in header_candidates:
+                headers["Content-Type"] = "application/json"
+                if str(idempotency_key or "").strip():
+                    headers["X-Idempotency-Key"] = str(idempotency_key).strip()
+                if session_token:
+                    headers["X-Session-Token"] = session_token
+                try:
+                    response_payload, _ = get_json_from_candidate_paths(
+                        client=client,
+                        base_url=str(self.settings.srms_base_url),
+                        paths=provision_paths,
+                        headers=headers,
+                        method="POST",
+                        json_body=payload_body,
+                        module_name="SRMS",
+                        payload_security_mode=self.settings.srms_payload_security_mode,
+                        payload_signing_secret=self.settings.srms_payload_signing_secret,
+                        payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                        payload_session_token=session_token,
+                        prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                            path=path,
+                            session_token=session_token,
+                            method="POST",
+                            base_headers=base_headers,
+                        ),
+                    )
+                    break
+                except HTTPException as exc:
+                    last_exception = exc
+                    if exc.status_code == status.HTTP_502_BAD_GATEWAY and self.settings.srms_auto_session_token:
+                        refreshed = self._refresh_runtime_session_token(client)
+                        if refreshed:
+                            headers["X-Session-Token"] = refreshed
+                            try:
+                                response_payload, _ = get_json_from_candidate_paths(
+                                    client=client,
+                                    base_url=str(self.settings.srms_base_url),
+                                    paths=provision_paths,
+                                    headers=headers,
+                                    method="POST",
+                                    json_body=payload_body,
+                                    module_name="SRMS",
+                                    payload_security_mode=self.settings.srms_payload_security_mode,
+                                    payload_signing_secret=self.settings.srms_payload_signing_secret,
+                                    payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                                    payload_session_token=refreshed,
+                                    prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                                        path=path,
+                                        session_token=refreshed,
+                                        method="POST",
+                                        base_headers=base_headers,
+                                    ),
+                                )
+                                session_token = refreshed
+                                break
+                            except HTTPException as refreshed_exc:
+                                last_exception = refreshed_exc
+                    continue
+
+        if response_payload is None and last_exception is not None:
+            raise last_exception
+
+        if not isinstance(response_payload, dict):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="SRMS tenant user provision payload is invalid",
+            )
+
+        source = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else response_payload
+        source = source if isinstance(source, dict) else {}
+        user_block = source.get("user") if isinstance(source.get("user"), dict) else {}
+        provisioned_value = source.get("provisioned")
+        provisioned = bool(provisioned_value) if isinstance(provisioned_value, bool) else False
+        if not isinstance(provisioned_value, bool):
+            status_text = str(source.get("status") or response_payload.get("message") or "").strip().lower()
+            provisioned = status_text in {"created", "provisioned", "success", "ok"}
+
+        return {
+            "tenant_id": tenant_id_str,
+            "provisioned": provisioned,
+            "idempotency_key": to_str(source.get("idempotency_key")),
+            "user_id": to_str(
+                source.get("user_id")
+                or source.get("id")
+                or user_block.get("user_id")
+                or user_block.get("id")
+            ),
+            "email": to_str(source.get("email") or user_block.get("email") or email_value),
+            "username": to_str(source.get("username") or user_block.get("username") or username_value or email_value),
+            "message": to_str(response_payload.get("message") or source.get("message") or "ok"),
+            "raw": source,
         }

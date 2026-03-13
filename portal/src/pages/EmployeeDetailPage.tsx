@@ -4,6 +4,12 @@ import { ArrowLeft, User, Briefcase, Mail, Phone, MapPin, Calendar, ClipboardLis
 import { getEmployeeSummary, type EmployeeSummaryResponse } from '../api/hrisCoreClient';
 import { clsx } from 'clsx';
 
+const isHonorific = (value: unknown): boolean => {
+  const raw = String(value ?? '').trim().toLowerCase();
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  return ['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'phd'].includes(compact);
+};
+
 export const EmployeeDetailPage: React.FC = () => {
   const { employeeId } = useParams<{ employeeId: string }>();
   const [data, setData] = useState<EmployeeSummaryResponse | null>(null);
@@ -43,6 +49,11 @@ export const EmployeeDetailPage: React.FC = () => {
   }
 
   const emp = data.employee as Record<string, string>;
+  const titleValue = isHonorific(emp.position) ? String(emp.position ?? '').trim() : '';
+  const displayName = [titleValue, String(emp.full_name ?? '').trim()].filter(Boolean).join(' ').trim() || 'Employee';
+  const displayPosition = isHonorific(emp.position) ? '' : String(emp.position ?? '').trim();
+  const headerSubtitleLeft = displayPosition || String(emp.rank ?? '').trim() || String(emp.employee_type ?? '').trim() || 'Position not available';
+  const headerSubtitleRight = String(emp.department ?? '').trim() || String(emp.unit ?? '').trim() || 'Department not available';
   const tabs = [
     { id: 'profile' as const, label: 'Profile', icon: User },
     { id: 'appraisals' as const, label: 'Appraisals', icon: ClipboardList, count: data.appraisals.length },
@@ -61,8 +72,8 @@ export const EmployeeDetailPage: React.FC = () => {
           {(emp.first_name?.[0] ?? emp.full_name?.[0] ?? 'E').toUpperCase()}
         </div>
         <div className="flex-1">
-          <h1 className="text-xl font-bold text-gray-900">{emp.full_name}</h1>
-          <p className="text-sm text-gray-500">{emp.position} &middot; {emp.department}</p>
+          <h1 className="text-xl font-bold text-gray-900">{displayName}</h1>
+          <p className="text-sm text-gray-500">{headerSubtitleLeft} &middot; {headerSubtitleRight}</p>
           <div className="mt-2 flex flex-wrap gap-2">
             <span className={clsx(
               'inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium',
@@ -112,6 +123,7 @@ export const EmployeeDetailPage: React.FC = () => {
             <h3 className="mb-4 text-sm font-semibold text-gray-900">Personal Information</h3>
             <dl className="space-y-3">
               {[
+                { icon: User, label: 'Staff ID', value: emp.staff_id },
                 { icon: Mail, label: 'Email', value: emp.email },
                 { icon: Phone, label: 'Phone', value: emp.phone },
                 { icon: User, label: 'Gender', value: emp.gender },
@@ -135,7 +147,10 @@ export const EmployeeDetailPage: React.FC = () => {
                 { icon: MapPin, label: 'Branch', value: emp.branch },
                 { icon: Briefcase, label: 'Department', value: emp.department },
                 { icon: Briefcase, label: 'Unit', value: emp.unit },
+                { icon: Briefcase, label: 'Position', value: displayPosition },
                 { icon: Briefcase, label: 'Rank', value: emp.rank },
+                { icon: Briefcase, label: 'Employee Type', value: emp.employee_type },
+                { icon: User, label: 'Status', value: emp.status },
               ].map(item => (
                 <div key={item.label} className="flex items-start gap-3">
                   <item.icon className="mt-0.5 h-4 w-4 text-gray-400" />

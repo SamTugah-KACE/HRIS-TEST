@@ -410,15 +410,20 @@ def sync_tenant_users_identity_snapshot(
             )
             persisted += 1
             if keycloak_provision_enabled and email:
+                force_dev_temp_password = bool(
+                    export_enabled and settings.onboarding_dev_force_temp_password
+                )
                 keycloak_result = ensure_user_and_temp_password(
                     email=email,
                     username=(username or email).lower(),
                     tenant_id=write_tenant_id,
                     default_role=default_hris_role,
                     roles=resolved_hris_roles if resolved_hris_roles else [],
-                    # In development export mode, always force a temporary password so
-                    # exported testing credentials are complete (username + password).
-                    force_temp_password=export_enabled,
+                    # First-run dev/test credential exports require temp passwords for newly created users.
+                    # Existing users still remain protected from automatic resets by _should_issue_temp_password.
+                    send_temp_password=export_enabled,
+                    # Optional dev override: only force-reset when explicitly enabled.
+                    force_temp_password=force_dev_temp_password,
                 )
                 keycloak_user_id = str(keycloak_result.get("user_id") or "").strip()
                 if keycloak_user_id:

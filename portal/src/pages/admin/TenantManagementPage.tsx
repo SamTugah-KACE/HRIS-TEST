@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, Upload, CheckCircle, XCircle } from 'lucide-react';
+import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check } from 'lucide-react';
 import {
   getTenantBranding,
+  resetTenantUserPassword,
   getTenantStorageProviders,
   listTenants,
+  type TenantUserPasswordResetResponse,
   updateTenantBranding,
   updateTenantStorageProviders,
   uploadTenantLogo,
@@ -23,10 +25,25 @@ export const TenantManagementPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string>('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetUsername, setResetUsername] = useState('');
+  const [resetReason, setResetReason] = useState('manual_admin_reset');
+  const [resetResult, setResetResult] = useState<TenantUserPasswordResetResponse | null>(null);
+  const [showTemporaryPassword, setShowTemporaryPassword] = useState(false);
+  const [copiedTemporaryPassword, setCopiedTemporaryPassword] = useState(false);
+  const [resetConfirmationText, setResetConfirmationText] = useState('');
 
   const selectedTenant = useMemo(
     () => tenants.find((t) => t.tenant_id === selectedTenantId) || null,
     [tenants, selectedTenantId]
+  );
+  const resetConfirmationPhrase = 'RESET';
+  const canSubmitManualReset = Boolean(
+    selectedTenantId &&
+    !resetBusy &&
+    (resetEmail.trim() || resetUsername.trim()) &&
+    resetConfirmationText.trim().toUpperCase() === resetConfirmationPhrase
   );
 
   useEffect(() => {
@@ -71,6 +88,20 @@ export const TenantManagementPage: React.FC = () => {
     };
   }, [selectedTenantId]);
 
+  useEffect(() => {
+    if (!resetResult?.temporary_password) {
+      setShowTemporaryPassword(false);
+      setCopiedTemporaryPassword(false);
+      return;
+    }
+    setShowTemporaryPassword(false);
+    setCopiedTemporaryPassword(false);
+    const timer = window.setTimeout(() => {
+      setShowTemporaryPassword(false);
+    }, 60_000);
+    return () => window.clearTimeout(timer);
+  }, [resetResult?.temporary_password]);
+
   const onSaveBranding = async () => {
     if (!selectedTenantId) return;
     setSaving(true);
@@ -114,6 +145,68 @@ export const TenantManagementPage: React.FC = () => {
       setMessage(`Failed to upload ${kind} logo.`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const makeIdempotencyKey = (): string => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `portal-reset-${crypto.randomUUID()}`;
+    }
+    return `portal-reset-${Date.now()}`;
+  };
+
+  const onManualPasswordReset = async () => {
+    if (!selectedTenantId) return;
+    const email = resetEmail.trim().toLowerCase();
+    const username = resetUsername.trim().toLowerCase();
+    if (!email && !username) {
+      setMessage('Provide at least email or username for manual reset.');
+      return;
+    }
+    if (resetConfirmationText.trim().toUpperCase() !== resetConfirmationPhrase) {
+      setMessage(`Type ${resetConfirmationPhrase} to confirm this security action.`);
+      return;
+    }
+
+    setResetBusy(true);
+    setMessage('');
+    setResetResult(null);
+    try {
+      const result = await resetTenantUserPassword(selectedTenantId, {
+        email: email || undefined,
+        username: username || undefined,
+        reason: (resetReason || 'manual_admin_reset').trim(),
+        idempotency_key: makeIdempotencyKey(),
+      });
+      setResetResult(result);
+      setCopiedTemporaryPassword(false);
+      setShowTemporaryPassword(false);
+      if (result.idempotent_replay) {
+        setMessage('Duplicate reset request detected and safely ignored.');
+      } else if (result.reset_applied) {
+        setMessage('Manual password reset completed.');
+      } else {
+        setMessage(result.reason || 'Manual password reset was not applied.');
+      }
+      setResetConfirmationText('');
+    } catch {
+      setMessage('Failed to perform manual password reset.');
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
+  const onCopyTemporaryPassword = async () => {
+    const temp = resetResult?.temporary_password;
+    if (!temp || typeof navigator === 'undefined' || !navigator.clipboard) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(temp);
+      setCopiedTemporaryPassword(true);
+      window.setTimeout(() => setCopiedTemporaryPassword(false), 2_000);
+    } catch {
+      setCopiedTemporaryPassword(false);
     }
   };
 
@@ -221,6 +314,98 @@ export const TenantManagementPage: React.FC = () => {
             <button className="btn-primary" disabled={saving} onClick={onSaveProviders}>
               Save Storage Providers
             </button>
+          </div>
+
+          <div className="card space-y-4 lg:col-span-2">
+            <h2 className="text-sm font-semibold text-gray-900">Manual User Password Reset (Admin Only)</h2>
+            <p className="text-xs text-amber-700">
+              Use only for intentional credential recovery. The generated temporary password is shown once.
+            </p>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-600">User Email</label>
+                <input
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  value={resetEmail}
+                  onChange={(e) => setResetEmail(e.target.value)}
+                  placeholder="employee@example.com"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Username (optional)</label>
+                <input
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  value={resetUsername}
+                  onChange={(e) => setResetUsername(e.target.value)}
+                  placeholder="employee@example.com"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">Reason</label>
+              <input
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                value={resetReason}
+                onChange={(e) => setResetReason(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">
+                Confirmation (type <span className="font-mono">{resetConfirmationPhrase}</span>)
+              </label>
+              <input
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono"
+                value={resetConfirmationText}
+                onChange={(e) => setResetConfirmationText(e.target.value)}
+                placeholder={resetConfirmationPhrase}
+                autoComplete="off"
+              />
+            </div>
+            <button className="btn-primary" disabled={!canSubmitManualReset} onClick={onManualPasswordReset}>
+              {resetBusy ? 'Resetting Password...' : 'Reset User Password'}
+            </button>
+            {resetResult ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <div>
+                  <span className="font-semibold">Target:</span>{' '}
+                  {resetResult.target_email || resetResult.target_username || 'unknown'}
+                </div>
+                <div>
+                  <span className="font-semibold">Applied:</span> {String(Boolean(resetResult.reset_applied))}
+                </div>
+                {resetResult.temporary_password ? (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold">Temporary Password:</span>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2 py-1 text-xs"
+                        onClick={() => setShowTemporaryPassword((prev) => !prev)}
+                      >
+                        {showTemporaryPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        {showTemporaryPassword ? 'Hide' : 'Reveal'}
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2 py-1 text-xs"
+                        onClick={onCopyTemporaryPassword}
+                      >
+                        {copiedTemporaryPassword ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                        {copiedTemporaryPassword ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                    <div className="break-all rounded border border-amber-200 bg-white p-2 font-mono text-xs">
+                      {showTemporaryPassword
+                        ? resetResult.temporary_password
+                        : '******** ******** ********'}
+                    </div>
+                    <div className="text-xs">
+                      Password visibility auto-hides after 60 seconds.
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
       )}

@@ -392,6 +392,8 @@ def get_json_from_candidate_paths(
     paths: Iterable[str],
     headers: Dict[str, str],
     params: Optional[Dict[str, Any]] = None,
+    method: str = "GET",
+    json_body: Optional[Dict[str, Any]] = None,
     module_name: str,
     payload_security_mode: str = "plain",
     payload_signing_secret: Optional[str] = None,
@@ -412,7 +414,13 @@ def get_json_from_candidate_paths(
         if prepare_headers is not None:
             request_headers = prepare_headers(path, request_headers)
         try:
-            response = client.get(url, headers=request_headers, params=params)
+            method_name = method.upper().strip() or "GET"
+            if method_name == "GET":
+                response = client.get(url, headers=request_headers, params=params)
+            elif method_name == "POST":
+                response = client.post(url, headers=request_headers, params=params, json=json_body)
+            else:
+                response = client.request(method_name, url, headers=request_headers, params=params, json=json_body)
             last_response = response
             path_statuses[path] = int(response.status_code)
         except httpx.HTTPError as exc:

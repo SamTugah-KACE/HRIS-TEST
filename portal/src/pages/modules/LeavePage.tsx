@@ -8,8 +8,9 @@ import { HRIS_ROLES, isManagerRole } from '../../auth/roles';
 import { StatCard } from '../../components/StatCard';
 import { LeaveApplicationModal } from '../../components/LeaveApplicationModal';
 import { clsx } from 'clsx';
-import { getLeaveModuleData, type LeaveModuleResponse } from '../../api/hrisCoreClient';
+import { getLeaveModuleData, getModulesCatalog, type LeaveModuleResponse } from '../../api/hrisCoreClient';
 import { isApiDataMode } from '../../config/dataMode';
+import { getModuleModeHint } from '../../shared/moduleMode';
 
 const LEAVE_BALANCES = [
   { type: 'Annual Leave', total: 23, used: 8, pending: 3, color: 'bg-blue-500' },
@@ -52,6 +53,8 @@ export const LeavePage: React.FC = () => {
   const [apiData, setApiData] = useState<LeaveModuleResponse | null>(null);
   const [loading, setLoading] = useState(isApiDataMode);
   const [error, setError] = useState<string | null>(null);
+  const [dataSourceMode, setDataSourceMode] = useState<'native' | 'mock'>(isApiDataMode ? 'native' : 'mock');
+  const [readMode, setReadMode] = useState(isApiDataMode ? 'native-readonly' : 'mock');
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -72,6 +75,19 @@ export const LeavePage: React.FC = () => {
       .then((d) => { if (mounted) setApiData(d); })
       .catch(() => { if (mounted) setError('Failed to load leave module data in API mode.'); })
       .finally(() => { if (mounted) setLoading(false); });
+    getModulesCatalog()
+      .then((catalog) => {
+        if (!mounted) return;
+        const moduleRow = (catalog.modules || []).find((m) => String(m.id || '').toLowerCase() === 'eleave');
+        const mode = String(moduleRow?.capabilities?.read_mode || 'native-readonly').trim();
+        setDataSourceMode('native');
+        setReadMode(mode || 'native-readonly');
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setDataSourceMode(isApiDataMode ? 'native' : 'mock');
+        setReadMode(isApiDataMode ? 'native-readonly' : 'mock');
+      });
     return () => { mounted = false; };
   }, []);
 
@@ -127,8 +143,18 @@ export const LeavePage: React.FC = () => {
         </div>
         <div className="flex flex-col items-end gap-2">
           <div className="flex flex-wrap justify-end gap-2">
-            <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">native</span>
-            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">native-readonly</span>
+            <span
+              title={getModuleModeHint(dataSourceMode)}
+              className="cursor-help rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700"
+            >
+              {dataSourceMode}
+            </span>
+            <span
+              title={getModuleModeHint(readMode)}
+              className="cursor-help rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700"
+            >
+              {readMode}
+            </span>
           </div>
           <div className="flex gap-2">
           {!isManager && (

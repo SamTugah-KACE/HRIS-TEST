@@ -26,11 +26,18 @@ class HttpEleaveAdapter(EleaveAdapter):
 
     def _candidate_paths(self, hris_path: str, module_path: str) -> List[str]:
         mode = self.settings.module_adapter_mode.lower()
+        hris_candidates = [hris_path]
+        if hris_path.startswith("/hris/"):
+            hris_candidates = [
+                hris_path.replace("/hris/", "/api/hris/v1/", 1),
+                hris_path.replace("/hris/", "/api/hris/", 1),
+                hris_path,
+            ]
         if mode == "hris_contract":
-            return [hris_path]
+            return hris_candidates
         if mode == "module_native":
             return [module_path]
-        return [hris_path, module_path]
+        return [*hris_candidates, module_path]
 
     def _build_base_url(self, mapping: TenantMapping) -> str:
         if not self.settings.eleave_domain_template or not mapping.eleave_subdomain:
