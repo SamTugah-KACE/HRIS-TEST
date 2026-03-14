@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { getModulesCatalog, getMyProfile, type ProfileDataResponse } from '../api/hrisCoreClient';
+import { httpClient } from '../api/httpClient';
 import { isApiDataMode } from '../config/dataMode';
 import { getModuleModeHint } from '../shared/moduleMode';
 
@@ -101,10 +102,85 @@ export const ProfilePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [dataSourceMode, setDataSourceMode] = useState<'native' | 'mock'>(isApiDataMode ? 'native' : 'mock');
   const [readMode, setReadMode] = useState('native-readonly');
+  const [previewDocument, setPreviewDocument] = useState<{ name: string; url: string; inlineSupported: boolean; reason?: string } | null>(null);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
+  };
+
+  const resolveDocumentUrl = (documentRow: Record<string, unknown>): string => {
+    const toAbsoluteApiUrl = (value: string): string => {
+      const raw = String(value || '').trim();
+      if (!raw) return '';
+      if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+      if (raw.startsWith('/')) {
+        const base = String(httpClient.defaults.baseURL || '').replace(/\/+$/, '');
+        return `${base}${raw}`;
+      }
+      return raw;
+    };
+    const explicit = String(documentRow.url ?? '').trim();
+    if (explicit) return toAbsoluteApiUrl(explicit);
+    const path = String(documentRow.path ?? '').trim();
+    if (!path) return '';
+    return toAbsoluteApiUrl(path);
+  };
+
+  const resolveInlineDocumentUrl = (documentRow: Record<string, unknown>): string => {
+    const inline = String(documentRow.inlineUrl ?? '').trim();
+    if (inline) {
+      const base = String(httpClient.defaults.baseURL || '').replace(/\/+$/, '');
+      return inline.startsWith('/') ? `${base}${inline}` : inline;
+    }
+    return resolveDocumentUrl(documentRow);
+  };
+
+  const getDocumentExtension = (documentRow: Record<string, unknown>): string => {
+    const fileName = String(documentRow.name ?? '').trim();
+    const path = String(documentRow.path ?? '').trim();
+    const candidates = [fileName, path].filter(Boolean);
+    for (const candidate of candidates) {
+      const withoutQueryOrHash = candidate.split(/[?#]/)[0];
+      const lastSegment = withoutQueryOrHash.split('/').pop() || withoutQueryOrHash;
+      const dotIdx = lastSegment.lastIndexOf('.');
+      if (dotIdx > -1 && dotIdx < lastSegment.length - 1) {
+        return lastSegment.slice(dotIdx + 1).toLowerCase();
+      }
+    }
+    return '';
+  };
+
+  const canInlinePreview = (documentRow: Record<string, unknown>): { supported: boolean; reason?: string } => {
+    const ext = getDocumentExtension(documentRow);
+    // Keep preview permissive for backward compatibility: unknown extensions
+    // should still attempt inline preview, just like before.
+    const nonPreviewable = new Set([
+      'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+      'zip', 'rar', '7z', 'tar', 'gz',
+      'exe', 'msi', 'apk',
+    ]);
+    if (ext && nonPreviewable.has(ext)) {
+      return { supported: false, reason: `.${ext.toUpperCase()} is not reliably previewable in browser iframe.` };
+    }
+    return { supported: true };
+  };
+
+  const canDownloadDocument = (documentRow: Record<string, unknown>): boolean => {
+    const explicit = documentRow.downloadable;
+    if (typeof explicit === 'boolean') return explicit;
+    const permissions = documentRow.permissions;
+    if (permissions && typeof permissions === 'object' && 'download' in (permissions as Record<string, unknown>)) {
+      return Boolean((permissions as Record<string, unknown>).download);
+    }
+    const url = resolveDocumentUrl(documentRow);
+    return Boolean(url);
+  };
+
+  const isMeaningful = (value: unknown): boolean => {
+    const text = String(value ?? '').trim();
+    if (!text) return false;
+    return text.toLowerCase() !== 'n/a';
   };
 
   const handleSave = () => {
@@ -176,6 +252,50 @@ export const ProfilePage: React.FC = () => {
     const subtitleLeft = normalizedPosition || String(employment.rank ?? '').trim() || String(employment.employeeType ?? '').trim() || 'Position not available';
     const subtitleRight = String(employment.department ?? '').trim() || String(employment.unit ?? '').trim() || 'Department not available';
 
+    const personalRows = [
+      { label: 'Staff ID', value: String(profile.staffId ?? '') },
+      { label: 'Email', value: String(profile.email ?? '') },
+      { label: 'Phone', value: String(profile.phone ?? '') },
+      { label: 'Gender', value: String(profile.gender ?? '') },
+      { label: 'Date of Birth', value: String(profile.dateOfBirth ?? '') },
+      { label: 'Marital Status', value: String(profile.maritalStatus ?? '') },
+      { label: 'Residential Address', value: String(profile.residentialAddress ?? '') },
+    ].filter((row) => isMeaningful(row.value));
+
+    const employmentRows = [
+      { label: 'Organization', value: String(employment.organization ?? '') },
+      { label: 'Branch', value: String(employment.branch ?? '') },
+      { label: 'Department', value: String(employment.department ?? '') },
+      { label: 'Unit', value: String(employment.unit ?? '') },
+      { label: 'Position', value: normalizedPosition || '' },
+      { label: 'Rank', value: String(employment.rank ?? '') },
+      { label: 'Employee Type', value: String(employment.employeeType ?? '') },
+      { label: 'Hire Date', value: String(employment.hireDate ?? '') },
+      { label: 'Status', value: String(employment.status ?? '') },
+    ].filter((row) => isMeaningful(row.value));
+
+    const preview = previewDocument;
+    const extractYearValue = (qualification: Record<string, unknown>): number | null => {
+      const raw = String(qualification.year ?? qualification.year_obtained ?? '').trim();
+      const match = raw.match(/\b(19|20)\d{2}\b/);
+      return match ? Number(match[0]) : null;
+    };
+    const sortByYearAscending = (a: Record<string, unknown>, b: Record<string, unknown>): number => {
+      const yearA = extractYearValue(a);
+      const yearB = extractYearValue(b);
+      if (yearA === null && yearB === null) return 0;
+      if (yearA === null) return 1;
+      if (yearB === null) return -1;
+      return yearA - yearB;
+    };
+    const academicQualifications = qualifications.filter((q) => {
+      const type = String(q.type ?? '').toLowerCase();
+      return type.includes('academic') || type.includes('degree');
+    }).sort((a, b) => sortByYearAscending(a as Record<string, unknown>, b as Record<string, unknown>));
+    const professionalQualifications = qualifications.filter((q) => {
+      const type = String(q.type ?? '').toLowerCase();
+      return type.includes('professional') || type.includes('cert');
+    }).sort((a, b) => sortByYearAscending(a as Record<string, unknown>, b as Record<string, unknown>));
     return (
       <div className="space-y-6">
         <div className="card overflow-hidden p-0">
@@ -202,7 +322,7 @@ export const ProfilePage: React.FC = () => {
               <span className="rounded-full bg-white/20 px-2.5 py-0.5 text-xs font-medium">{String(employment.branch ?? 'N/A')}</span>
             </div>
           </div>
-          <div className="grid grid-cols-2 divide-x divide-gray-100 border-b border-gray-100 sm:grid-cols-4">
+          <div className="grid grid-cols-2 divide-x divide-gray-100 border-b border-gray-100 sm:grid-cols-4 dark:divide-gray-800 dark:border-gray-800">
             {[
               { label: 'Years of Service', value: String(quickStats.years_of_service ?? 'N/A'), icon: Clock },
               { label: 'Leave Balance', value: String(quickStats.leave_balance ?? 'N/A'), icon: Calendar },
@@ -212,75 +332,255 @@ export const ProfilePage: React.FC = () => {
               <div key={s.label} className="flex items-center gap-3 px-4 py-3">
                 <s.icon className="h-5 w-5 text-brand-500" />
                 <div>
-                  <p className="text-xs text-gray-500">{s.label}</p>
-                  <p className="text-sm font-semibold text-gray-900">{s.value}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{s.label}</p>
+                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{s.value}</p>
                 </div>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-gray-900">Personal</h3>
+            <h3 className="mb-3 text-sm font-semibold text-gray-900 dark:text-gray-100">Personal</h3>
             <dl className="space-y-2 text-sm">
-              <div><dt className="text-gray-500">Staff ID</dt><dd className="font-medium text-gray-900">{String(profile.staffId ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Email</dt><dd className="font-medium text-gray-900">{String(profile.email ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Phone</dt><dd className="font-medium text-gray-900">{String(profile.phone ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Gender</dt><dd className="font-medium text-gray-900">{String(profile.gender ?? 'N/A')}</dd></div>
+              {personalRows.length === 0 ? (
+                <p className="text-sm text-gray-500 dark:text-gray-400">No personal data available.</p>
+              ) : personalRows.map((row) => (
+                <div key={row.label} className="min-w-0">
+                  <dt className="text-gray-500 dark:text-gray-400">{row.label}</dt>
+                  <dd className="break-words font-medium text-gray-900 dark:text-gray-100">{row.value}</dd>
+                </div>
+              ))}
             </dl>
           </div>
           <div className="card">
-            <h3 className="mb-3 text-sm font-semibold text-gray-900">Employment</h3>
+            <h3 className="mb-3 text-sm font-semibold text-gray-900 dark:text-gray-100">Employment</h3>
             <dl className="space-y-2 text-sm">
-              <div><dt className="text-gray-500">Organization</dt><dd className="font-medium text-gray-900">{String(employment.organization ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Branch</dt><dd className="font-medium text-gray-900">{String(employment.branch ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Department</dt><dd className="font-medium text-gray-900">{String(employment.department ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Unit</dt><dd className="font-medium text-gray-900">{String(employment.unit ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Position</dt><dd className="font-medium text-gray-900">{normalizedPosition || 'N/A'}</dd></div>
-              <div><dt className="text-gray-500">Rank</dt><dd className="font-medium text-gray-900">{String(employment.rank ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Employee Type</dt><dd className="font-medium text-gray-900">{String(employment.employeeType ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Hire Date</dt><dd className="font-medium text-gray-900">{String(employment.hireDate ?? 'N/A')}</dd></div>
-              <div><dt className="text-gray-500">Status</dt><dd className="font-medium text-gray-900">{String(employment.status ?? 'N/A')}</dd></div>
+              {employmentRows.length === 0 ? (
+                <p className="text-sm text-gray-500 dark:text-gray-400">No employment data available.</p>
+              ) : employmentRows.map((row) => (
+                <div key={row.label} className="min-w-0">
+                  <dt className="text-gray-500 dark:text-gray-400">{row.label}</dt>
+                  <dd className="break-words font-medium text-gray-900 dark:text-gray-100">{row.value}</dd>
+                </div>
+              ))}
             </dl>
+          </div>
+          <div className="card">
+            <h3 className="mb-3 text-sm font-semibold text-gray-900 dark:text-gray-100">Emergency Contacts</h3>
+            <div className="space-y-2">
+              {contacts.length === 0 ? <p className="text-sm text-gray-500">No contacts available.</p> : contacts.map((c, i) => (
+                <div key={i} className="rounded-lg border border-gray-100 p-3 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md dark:border-gray-800">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{String(c.name ?? 'N/A')}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{String(c.relationship ?? '')} &middot; {String(c.phone ?? '')}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-3">
-          <div className="card lg:col-span-1">
-            <h3 className="mb-3 text-sm font-semibold text-gray-900">Qualifications</h3>
-            <div className="space-y-2">
-              {qualifications.length === 0 ? <p className="text-sm text-gray-500">No qualifications available.</p> : qualifications.map((q, i) => (
-                <div key={i} className="rounded-lg border border-gray-100 p-3">
-                  <p className="text-sm font-medium text-gray-900">{String(q.title ?? 'Untitled')}</p>
-                  <p className="text-xs text-gray-500">{String(q.institution ?? '')}</p>
-                </div>
-              ))}
+        <details className="card group" open>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2">
+            <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">Qualifications</span>
+            <span className="text-xs text-gray-500 transition-transform group-open:rotate-180 dark:text-gray-400">▼</span>
+          </summary>
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+              <div className="border-b border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-800 dark:bg-gray-900/60">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Academic</h4>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b border-gray-200 dark:border-gray-800">
+                    <tr>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Qualification</th>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Institution</th>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Year</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {academicQualifications.length === 0 ? (
+                      <tr>
+                        <td className="px-3 py-3 text-sm text-gray-500 dark:text-gray-400" colSpan={3}>No academic qualifications.</td>
+                      </tr>
+                    ) : academicQualifications.map((q, i) => (
+                      <tr key={`a-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/40">
+                        <td className="px-3 py-2 font-medium text-gray-900 dark:text-gray-100">{String(q.title ?? 'Untitled')}</td>
+                        <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{String(q.institution ?? 'N/A')}</td>
+                        <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{String(q.year ?? q.year_obtained ?? 'N/A')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+              <div className="border-b border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-800 dark:bg-gray-900/60">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Professional</h4>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="border-b border-gray-200 dark:border-gray-800">
+                    <tr>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Qualification</th>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Institution</th>
+                      <th className="px-3 py-2 font-medium text-gray-500 dark:text-gray-400">Year</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {professionalQualifications.length === 0 ? (
+                      <tr>
+                        <td className="px-3 py-3 text-sm text-gray-500 dark:text-gray-400" colSpan={3}>No professional qualifications.</td>
+                      </tr>
+                    ) : professionalQualifications.map((q, i) => (
+                      <tr key={`p-${i}`} className="hover:bg-gray-50 dark:hover:bg-gray-800/40">
+                        <td className="px-3 py-2 font-medium text-gray-900 dark:text-gray-100">{String(q.title ?? 'Untitled')}</td>
+                        <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{String(q.institution ?? 'N/A')}</td>
+                        <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{String(q.year ?? q.year_obtained ?? 'N/A')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
-          <div className="card lg:col-span-1">
-            <h3 className="mb-3 text-sm font-semibold text-gray-900">Emergency Contacts</h3>
-            <div className="space-y-2">
-              {contacts.length === 0 ? <p className="text-sm text-gray-500">No contacts available.</p> : contacts.map((c, i) => (
-                <div key={i} className="rounded-lg border border-gray-100 p-3">
-                  <p className="text-sm font-medium text-gray-900">{String(c.name ?? 'N/A')}</p>
-                  <p className="text-xs text-gray-500">{String(c.relationship ?? '')} &middot; {String(c.phone ?? '')}</p>
-                </div>
-              ))}
+        </details>
+
+        <div className="card">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Documents</h3>
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">Preview</span>
+              <span className="text-gray-500 dark:text-gray-400">opens inline</span>
+              <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">Download only</span>
+              <span className="text-gray-500 dark:text-gray-400">open in tab/download</span>
             </div>
           </div>
-          <div className="card lg:col-span-1">
-            <h3 className="mb-3 text-sm font-semibold text-gray-900">Documents</h3>
-            <div className="space-y-2">
-              {documents.length === 0 ? <p className="text-sm text-gray-500">No documents available.</p> : documents.map((d, i) => (
-                <div key={i} className="rounded-lg border border-gray-100 p-3">
-                  <p className="text-sm font-medium text-gray-900">{String(d.name ?? 'Untitled')}</p>
-                  <p className="text-xs text-gray-500">{String(d.category ?? '')} &middot; {String(d.type ?? '')}</p>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {documents.length === 0 ? <p className="text-sm text-gray-500">No documents available.</p> : documents.map((d, i) => (
+              <div key={i} className="rounded-lg border border-gray-100 p-3 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md dark:border-gray-800">
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{String(d.name ?? 'Untitled')}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{String(d.category ?? '')} &middot; {String(d.type ?? '')}</p>
+                {(() => {
+                  const doc = d as Record<string, unknown>;
+                  const previewSupport = canInlinePreview(doc);
+                  const canDownload = canDownloadDocument(doc);
+                  return (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {previewSupport.supported && (
+                        <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                          Preview
+                        </span>
+                      )}
+                      {canDownload && (
+                        <span className="inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
+                          Download
+                        </span>
+                      )}
+                      {!previewSupport.supported && !canDownload && (
+                        <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                          Restricted
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+                <p className="mt-1 break-all text-[11px] text-gray-400 dark:text-gray-500">{String(d.path ?? '')}</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {resolveDocumentUrl(d as Record<string, unknown>) ? (
+                    <>
+                      {canInlinePreview(d as Record<string, unknown>).supported && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const doc = d as Record<string, unknown>;
+                            const previewSupport = canInlinePreview(doc);
+                            setPreviewDocument({
+                              name: String(d.name ?? 'Document'),
+                              url: resolveInlineDocumentUrl(doc),
+                              inlineSupported: previewSupport.supported,
+                              reason: previewSupport.reason,
+                            });
+                          }}
+                          className="btn-secondary py-1 text-xs"
+                          title="Open inline preview"
+                        >
+                          <FileText className="h-3.5 w-3.5" /> View
+                        </button>
+                      )}
+                      {canDownloadDocument(d as Record<string, unknown>) && (
+                        <a
+                          href={resolveDocumentUrl(d as Record<string, unknown>)}
+                          download
+                          className="btn-secondary py-1 text-xs"
+                        >
+                          <Download className="h-3.5 w-3.5" /> Download
+                        </a>
+                      )}
+                      {!canInlinePreview(d as Record<string, unknown>).supported && !canDownloadDocument(d as Record<string, unknown>) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const doc = d as Record<string, unknown>;
+                          const previewSupport = canInlinePreview(doc);
+                          setPreviewDocument({
+                            name: String(d.name ?? 'Document'),
+                            url: resolveInlineDocumentUrl(doc),
+                            inlineSupported: previewSupport.supported,
+                            reason: previewSupport.reason,
+                          });
+                        }}
+                        className="btn-secondary py-1 text-xs"
+                        title="Restricted document"
+                      >
+                        <FileText className="h-3.5 w-3.5" /> Details
+                      </button>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-xs text-amber-600 dark:text-amber-400">Document URL unavailable</span>
+                  )}
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
         </div>
+        {preview && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
+            <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:border-gray-800 dark:bg-gray-900">
+              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-800">
+                <p className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{preview.name}</p>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDocument(null)}
+                  className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="h-[75vh] w-full bg-gray-50 dark:bg-gray-950">
+                {preview.inlineSupported ? (
+                  <iframe
+                    src={preview.url}
+                    title={preview.name}
+                    className="h-full w-full"
+                  />
+                ) : (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+                    <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{preview.reason || 'Inline preview unavailable for this file.'}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">Use Open in new tab or Download to access this document.</p>
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end border-t border-gray-200 px-4 py-3 dark:border-gray-800">
+                <a href={preview.url} target="_blank" rel="noreferrer" className="btn-secondary py-1 text-xs">
+                  Open in new tab
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

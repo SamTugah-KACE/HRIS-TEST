@@ -1,7 +1,6 @@
 import logging
 
 from fastapi import APIRouter, Depends, Request
-from fastapi import HTTPException
 
 from app.core.auth import AuthenticatedUser, get_current_user
 from app.services.tenant_registry_client import get_tenant_mapping
@@ -36,12 +35,85 @@ def _to_int_safe(value, default: int) -> int:
         return default
 
 
+def _build_superadmin_dashboard_summary(
+    user: AuthenticatedUser,
+    *,
+    correlation_id: str,
+):
+    organizations_payload = _safe_get(
+        lambda: srms_client.list_organizations(user.raw_token),
+        {"organizations": [], "summary": {"total": 0, "active": 0, "inactive": 0}},
+        module_name="srms.organizations",
+        tenant_id=user.tenant_id,
+        correlation_id=correlation_id,
+    )
+    organizations = organizations_payload.get("organizations", [])
+    summary = organizations_payload.get("summary", {})
+
+    # Platform superadmin intentionally uses a global dashboard context.
+    return {
+        "user": {
+            "username": user.username,
+            "effective_role": user.effective_role,
+            "roles": user.roles,
+        },
+        "tenant": {
+            "code": "PLATFORM",
+            "name": "HRIS Platform",
+            "status": "active",
+            "modules": {"srms": {}, "eappraisal": {}, "eleave": {}},
+        },
+        "srms": {
+            "total_employees": 0,
+            "active_employees": 0,
+            "inactive_employees": 0,
+            "branches": 0,
+            "departments": 0,
+            "new_hires_this_month": 0,
+            "pending_enlistments": 0,
+        },
+        "appraisal": {
+            "active_cycles": 0,
+            "pending_reviews": 0,
+            "completed_reviews": 0,
+            "overdue_reviews": 0,
+            "average_score": 0,
+            "completion_rate": 0,
+        },
+        "leave": {
+            "total_leaves_this_year": 0,
+            "approved_leaves": 0,
+            "pending_leaves": 0,
+            "rejected_leaves": 0,
+            "cancelled_leaves": 0,
+            "leave_utilization_rate": 0,
+        },
+        "superadmin": {
+            "tenants": organizations[:50] if isinstance(organizations, list) else [],
+            "tenant_summary": {
+                "total": _to_int_safe(summary.get("total"), len(organizations) if isinstance(organizations, list) else 0),
+                "active": _to_int_safe(summary.get("active"), 0),
+                "inactive": _to_int_safe(summary.get("inactive"), 0),
+            },
+        },
+        "quick_actions": [
+            {"id": "manage_tenants", "label": "Manage Tenants", "icon": "building-2", "href": "/admin/tenants"},
+            {"id": "manage_roles", "label": "Manage Roles", "icon": "shield", "href": "/admin/roles"},
+            {"id": "view_reports", "label": "View Reports", "icon": "bar-chart-2", "href": "/reports"},
+        ],
+    }
+
+
 @router.get("/summary")
 def get_dashboard_summary(
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     correlation_id = getattr(request.state, "correlation_id", "")
+
+    if user.effective_role == "hris:super_admin":
+        return _build_superadmin_dashboard_summary(user, correlation_id=correlation_id)
+
     mapping = get_tenant_mapping(user.tenant_id)
 
     srms_summary = {
@@ -142,24 +214,6 @@ def get_dashboard_summary(
 
     role = user.effective_role
     superadmin = None
-    if role == "hris:super_admin":
-        organizations_payload = _safe_get(
-            lambda: srms_client.list_organizations(user.raw_token),
-            {"organizations": [], "summary": {"total": 0, "active": 0, "inactive": 0}},
-            module_name="srms.organizations",
-            tenant_id=user.tenant_id,
-            correlation_id=correlation_id,
-        )
-        organizations = organizations_payload.get("organizations", [])
-        summary = organizations_payload.get("summary", {})
-        superadmin = {
-            "tenants": organizations[:50],
-            "tenant_summary": {
-                "total": _to_int_safe(summary.get("total"), len(organizations)),
-                "active": _to_int_safe(summary.get("active"), 0),
-                "inactive": _to_int_safe(summary.get("inactive"), 0),
-            },
-        }
 
     quick_actions = []
     if role in ("hris:super_admin", "hris:tenant_admin", "hris:hr_manager"):

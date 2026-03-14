@@ -2,10 +2,13 @@ from datetime import date
 import logging
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi import HTTPException
+from fastapi.responses import Response
 
 from app.clients import eappraisal_client, eleave_client, srms_client
 from app.core.auth import AuthenticatedUser, get_current_user
@@ -250,23 +253,204 @@ def _merge_employee_sources(*sources: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
-_HONORIFIC_CANONICAL = {
-    "mr": "Mr.",
-    "mrs": "Mrs.",
-    "ms": "Ms.",
-    "miss": "Miss",
-    "dr": "Dr.",
-    "prof": "Prof.",
-    "phd": "PhD.",
+def _extract_list(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _normalize_profile_qualifications(self_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _append(items: List[Dict[str, Any]], default_type: str) -> None:
+        for item in items:
+            title = _extract_first(item, ["qualification", "title", "name"])
+            institution = _extract_first(item, ["institution", "issuer", "organization"])
+            year = _extract_first(item, ["year_obtained", "year"])
+            grade = _extract_first(item, ["grade", "score"])
+            doc_path = _extract_first(item, ["certificate_path", "license_path", "document_path", "file_path"])
+            identity = (
+                title.lower().strip(),
+                institution.lower().strip(),
+                year.strip(),
+                default_type.strip(),
+            )
+            if not any(identity):
+                continue
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(
+                {
+                    "type": default_type,
+                    "title": title,
+                    "institution": institution,
+                    "year": year,
+                    "grade": grade,
+                    "documentPath": doc_path,
+                }
+            )
+
+    _append(_extract_list(self_payload.get("academic_qualifications")), "Academic")
+    _append(_extract_list(self_payload.get("professional_qualifications")), "Professional")
+    _append(_extract_list(self_payload.get("qualifications")), "Qualification")
+    return rows
+
+
+def _normalize_profile_emergency_contacts(self_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    primary_rows = _extract_list(self_payload.get("emergency_contacts"))
+    personal_info = self_payload.get("personal_info") if isinstance(self_payload.get("personal_info"), dict) else {}
+    fallback_rows = _extract_list(personal_info.get("emergency_contacts"))
+    next_of_kin_rows = _extract_list(self_payload.get("next_of_kin")) or _extract_list(personal_info.get("next_of_kin"))
+    source_rows = primary_rows or fallback_rows or next_of_kin_rows
+
+    contacts: List[Dict[str, Any]] = []
+    seen: set = set()
+    for item in source_rows:
+        name = _extract_first(item, ["name", "full_name"])
+        phone = _extract_first(item, ["phone", "phone_number"])
+        relationship = _extract_first(item, ["relationship", "relation"])
+        key = (name.lower().strip(), phone.strip(), relationship.lower().strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        contacts.append(
+            {
+                "name": name,
+                "relationship": relationship,
+                "phone": phone,
+                "email": _extract_first(item, ["email"]),
+                "address": _extract_first(item, ["address", "residential_address"]),
+                "isPrimary": bool(item.get("is_primary", False)),
+            }
+        )
+    return contacts
+
+
+def _normalize_profile_documents(self_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    documents: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _add(path: str, *, category: str = "Document", label: str = "") -> None:
+        normalized_path = str(path or "").strip()
+        if not normalized_path:
+            return
+        key = normalized_path.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        name = label or normalized_path.split("/")[-1] or "Document"
+        ext = name.split(".")[-1].upper() if "." in name else ""
+        documents.append(
+            {
+                "name": name,
+                "category": category,
+                "type": ext,
+                "path": normalized_path,
+                "url": _build_document_url(normalized_path),
+                "inlineUrl": _build_document_inline_url(normalized_path),
+            }
+        )
+
+    for item in _extract_list(self_payload.get("documents")):
+        _add(
+            _extract_first(item, ["path", "file_path", "document_path", "url"]),
+            category=_extract_first(item, ["category", "type"]) or "Document",
+            label=_extract_first(item, ["name", "title"]),
+        )
+
+    for item in _extract_list(self_payload.get("academic_qualifications")):
+        _add(
+            _extract_first(item, ["certificate_path", "document_path"]),
+            category="Academic Qualification",
+            label=_extract_first(item, ["qualification", "title"]),
+        )
+    for item in _extract_list(self_payload.get("professional_qualifications")):
+        _add(
+            _extract_first(item, ["license_path", "document_path"]),
+            category="Professional Qualification",
+            label=_extract_first(item, ["qualification", "title"]),
+        )
+
+    custom_data = self_payload.get("custom_data") if isinstance(self_payload.get("custom_data"), dict) else {}
+    nested_custom = custom_data.get("custom_data") if isinstance(custom_data.get("custom_data"), dict) else {}
+    dynamic_data = nested_custom.get("dynamic_data") if isinstance(nested_custom.get("dynamic_data"), dict) else {}
+    employment_details = dynamic_data.get("employment_details") if isinstance(dynamic_data.get("employment_details"), dict) else {}
+    for key, value in employment_details.items():
+        if isinstance(value, dict):
+            payload_value = value.get("value")
+            if isinstance(payload_value, list):
+                for entry in payload_value:
+                    _add(str(entry), category="Employment Detail", label=str(key))
+            else:
+                _add(str(payload_value or ""), category="Employment Detail", label=str(key))
+        elif isinstance(value, list):
+            for entry in value:
+                _add(str(entry), category="Employment Detail", label=str(key))
+        else:
+            _add(str(value or ""), category="Employment Detail", label=str(key))
+    return documents
+
+
+_HONORIFIC_ALLOWED = {
+    "mr",
+    "mrs",
+    "ms",
+    "miss",
+    "dr",
+    "prof",
+    "phd",
 }
 
 
-def _normalize_honorific(value: Any) -> str:
+def _is_honorific(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    compact = "".join(ch for ch in raw.lower() if ch.isalnum())
+    return compact in _HONORIFIC_ALLOWED
+
+
+def _extract_honorific_preserve(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    compact = "".join(ch for ch in raw.lower() if ch.isalnum())
-    return _HONORIFIC_CANONICAL.get(compact, "")
+    return raw if _is_honorific(raw) else ""
+
+
+def _extract_profile_title(value: Any) -> str:
+    """Trust explicit SRMS title values, but keep them bounded and printable."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    cleaned = "".join(ch for ch in raw if ch.isprintable()).strip()
+    if not cleaned:
+        return ""
+    return cleaned[:64]
+
+
+def _build_document_url(path_value: str) -> str:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return ""
+    if path_text.startswith("http://") or path_text.startswith("https://"):
+        return path_text
+    settings = get_settings()
+    base = str(settings.srms_base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    normalized_path = path_text.lstrip("/")
+    if normalized_path.startswith("api/"):
+        return f"{base}/{normalized_path}"
+    return f"{base}/api/storage/download/{normalized_path}"
+
+
+def _build_document_inline_url(path_value: str) -> str:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return ""
+    return f"/profile/documents/inline?path={quote(path_text, safe='')}"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -372,6 +556,24 @@ def _profile_stub() -> Dict[str, Any]:
 def get_module_catalog(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
+    if user.effective_role == "hris:super_admin":
+        return {
+            "tenant": {
+                "tenant_id": "platform",
+                "code": "PLATFORM",
+                "name": "HRIS Platform",
+                "status": "active",
+            },
+            "workflow_standard": {
+                "version": "1.0",
+                "shape": "module-catalog",
+                "rbac_driven": True,
+                "data_access": "capability-based",
+            },
+            # Platform superadmin routes are handled by dedicated admin pages.
+            "modules": [],
+        }
+
     mapping = get_tenant_mapping(user.tenant_id)
     manager_view = can_view_manager_sections(user)
     modules = []
@@ -535,16 +737,49 @@ def get_my_profile(
         or user.username
     ).strip()
     full_name = str(employee.get("full_name") or fallback_full_name).strip()
+    self_profile_block = self_profile_payload.get("profile") if isinstance(self_profile_payload.get("profile"), dict) else {}
+    self_personal_info = self_profile_payload.get("personal_info") if isinstance(self_profile_payload.get("personal_info"), dict) else {}
+    self_contact_info = self_profile_payload.get("contact_info") if isinstance(self_profile_payload.get("contact_info"), dict) else {}
     parts = [p for p in full_name.split(" ") if p]
-    first_name = parts[0] if parts else user.username
-    last_name = parts[-1] if len(parts) > 1 else ""
-    other_names = " ".join(parts[1:-1]) if len(parts) > 2 else ""
+    first_name = (
+        _extract_first(self_profile_block, ["first_name", "firstName"])
+        or (parts[0] if parts else user.username)
+    )
+    last_name = (
+        _extract_first(self_profile_block, ["last_name", "lastName"])
+        or (parts[-1] if len(parts) > 1 else "")
+    )
+    other_names = (
+        _extract_first(self_profile_block, ["middle_name", "middleName"])
+        or (" ".join(parts[1:-1]) if len(parts) > 2 else "")
+    )
     resolved_title = (
-        _normalize_honorific(self_profile_payload.get("title"))
-        or _normalize_honorific(employee.get("position"))
+        _extract_profile_title(self_profile_payload.get("title"))
+        or _extract_profile_title(self_profile_block.get("title"))
+        or _extract_honorific_preserve(employee.get("position"))
     )
     raw_position = str(employee.get("position") or "").strip()
-    position_value = "" if _normalize_honorific(raw_position) else raw_position
+    position_value = "" if _is_honorific(raw_position) else raw_position
+    qualifications = _normalize_profile_qualifications(self_profile_payload)
+    emergency_contacts = _normalize_profile_emergency_contacts(self_profile_payload)
+    documents = _normalize_profile_documents(self_profile_payload)
+    date_of_birth = (
+        _extract_first(self_personal_info, ["date_of_birth", "dateOfBirth"])
+        or _extract_first(self_profile_payload, ["date_of_birth"])
+    )
+    marital_status = (
+        _extract_first(self_personal_info, ["marital_status", "maritalStatus"])
+        or _extract_first(self_profile_payload, ["marital_status"])
+    )
+    residential_address = (
+        _extract_first(self_contact_info, ["residential_address", "address"])
+        or _extract_first(self_personal_info.get("contact_info") if isinstance(self_personal_info.get("contact_info"), dict) else {}, ["residential_address", "address"])
+    )
+    phone_value = (
+        str(employee.get("phone") or "").strip()
+        or _extract_first(self_profile_block, ["phone", "phone_number"])
+        or _extract_first(self_contact_info, ["phone", "phone_number"])
+    )
 
     return {
         "profile": {
@@ -554,16 +789,16 @@ def get_my_profile(
             "title": resolved_title,
             "staffId": employee.get("staff_id", ""),
             "email": employee.get("email", user.email or ""),
-            "phone": employee.get("phone", ""),
+            "phone": phone_value,
             "personalEmail": "",
-            "dateOfBirth": "",
+            "dateOfBirth": date_of_birth,
             "gender": employee.get("gender", ""),
-            "maritalStatus": "",
+            "maritalStatus": marital_status,
             "nationality": "",
             "ghanaCardNo": "",
             "ssnitNo": "",
             "tinNo": "",
-            "residentialAddress": "",
+            "residentialAddress": residential_address,
             "digitalAddress": "",
         },
         "employment": {
@@ -583,16 +818,59 @@ def get_my_profile(
             "salaryStep": "",
             "previousPositions": [],
         },
-        "qualifications": [],
-        "emergency_contacts": [],
-        "documents": [],
+        "emergency_contacts": emergency_contacts,
+        "documents": documents,
+        "qualifications": qualifications,
         "quick_stats": {
             "years_of_service": _years_of_service(employee.get("hire_date")),
             "leave_balance": "N/A",
             "appraisal_score": "N/A",
-            "certifications": "0 active",
+            "certifications": f"{len(qualifications)} active",
         },
     }
+
+
+@profile_router.get("/documents/inline")
+def get_my_profile_document_inline(
+    path: str = Query(..., description="SRMS relative document path"),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        raise HTTPException(status_code=422, detail="Document path is required")
+    if raw_path.startswith("http://") or raw_path.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Absolute document URLs are not allowed")
+    normalized_path = raw_path.lstrip("/")
+    if ".." in normalized_path.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Invalid document path")
+
+    mapping = get_tenant_mapping(user.tenant_id)
+    _ensure_module_ready(mapping, "srms")
+    source_url = _build_document_url(normalized_path)
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Document URL is unavailable")
+
+    headers: Dict[str, str] = {}
+    if user.raw_token:
+        headers["Authorization"] = f"Bearer {user.raw_token}"
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            upstream = client.get(source_url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch document from SRMS: {exc}") from exc
+
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail="SRMS document fetch failed")
+
+    filename = normalized_path.split("/")[-1] or "document"
+    return Response(
+        content=upstream.content,
+        media_type=upstream.headers.get("content-type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/appraisal")

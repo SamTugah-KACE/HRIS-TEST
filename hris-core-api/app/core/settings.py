@@ -184,6 +184,21 @@ class Settings(BaseSettings):
     keycloak_admin_username: Optional[str] = Field(None, alias="KEYCLOAK_ADMIN_USERNAME")
     keycloak_admin_password: Optional[str] = Field(None, alias="KEYCLOAK_ADMIN_PASSWORD")
     keycloak_admin_realm: str = Field("master", alias="KEYCLOAK_ADMIN_REALM")
+    hris_superadmin_onboard_allowed_groups: Optional[str] = Field(
+        None, alias="HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS"
+    )
+    hris_superadmin_onboard_group_bootstrap_done: Optional[bool] = Field(
+        None, alias="HRIS_SUPERADMIN_ONBOARD_GROUP_BOOTSTRAP_DONE"
+    )
+    bootstrap_admin_enabled: bool = Field(False, alias="BOOTSTRAP_ADMIN_ENABLED")
+    bootstrap_superadmin_username: Optional[str] = Field(None, alias="BOOTSTRAP_SUPERADMIN_USERNAME")
+    bootstrap_superadmin_email: Optional[str] = Field(None, alias="BOOTSTRAP_SUPERADMIN_EMAIL")
+    bootstrap_superadmin_password: Optional[str] = Field(None, alias="BOOTSTRAP_SUPERADMIN_PASSWORD")
+    bootstrap_superadmin_tenant_id: Optional[str] = Field(None, alias="BOOTSTRAP_SUPERADMIN_TENANT_ID")
+    bootstrap_tenantadmin_username: Optional[str] = Field(None, alias="BOOTSTRAP_TENANTADMIN_USERNAME")
+    bootstrap_tenantadmin_email: Optional[str] = Field(None, alias="BOOTSTRAP_TENANTADMIN_EMAIL")
+    bootstrap_tenantadmin_password: Optional[str] = Field(None, alias="BOOTSTRAP_TENANTADMIN_PASSWORD")
+    bootstrap_tenantadmin_tenant_id: Optional[str] = Field(None, alias="BOOTSTRAP_TENANTADMIN_TENANT_ID")
     onboarding_send_temp_password_email: bool = Field(False, alias="ONBOARDING_SEND_TEMP_PASSWORD_EMAIL")
     onboarding_temp_password_length: int = Field(14, alias="ONBOARDING_TEMP_PASSWORD_LENGTH")
     onboarding_dev_credentials_export_enabled: bool = Field(
@@ -283,6 +298,8 @@ class Settings(BaseSettings):
             raise ValueError("TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN must be false in production")
         if self.onboarding_auto_keycloak_provision and self.auth_mode != "keycloak":
             raise ValueError("ONBOARDING_AUTO_KEYCLOAK_PROVISION requires AUTH_MODE=keycloak")
+        if self.bootstrap_admin_enabled and self.auth_mode != "keycloak":
+            raise ValueError("BOOTSTRAP_ADMIN_ENABLED requires AUTH_MODE=keycloak")
         if self.onboarding_temp_password_length < 10:
             raise ValueError("ONBOARDING_TEMP_PASSWORD_LENGTH must be at least 10")
         if self.storage_healthcheck_ttl_seconds <= 0:

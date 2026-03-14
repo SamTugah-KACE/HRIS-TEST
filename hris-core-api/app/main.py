@@ -22,6 +22,7 @@ from app.api.modules import router as modules_router, profile_router
 from app.api.tenants_onboarding import router as tenants_router
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
+from app.services.admin_bootstrap import bootstrap_admin_accounts_if_enabled
 from app.services.auto_sync_service import start_auto_sync_loop_if_enabled
 from app.services.db_health import ensure_runtime_databases_ready
 from app.services.onboarding_automation import run_post_deploy_automation
@@ -95,6 +96,10 @@ def validate_runtime_settings() -> None:
         )
         time.sleep(pause_seconds)
     _wait_for_tenant_registry_if_needed()
+    try:
+        bootstrap_admin_accounts_if_enabled()
+    except Exception:
+        logger.exception("Startup admin bootstrap failed")
     if settings.enable_startup_tenant_inventory_import:
         system_actor = AuthenticatedUser(
             sub="startup.import",

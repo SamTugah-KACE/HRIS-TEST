@@ -32,6 +32,93 @@ class AuthenticatedUser(BaseModel):
     token_claims: Dict[str, object] = {}
 
 
+def _extract_str_claim(payload: Dict[str, object], *keys: str) -> Optional[str]:
+    for key in keys:
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            value = raw.strip()
+            if value:
+                return value
+        elif isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value:
+                        return value
+
+    attributes = payload.get("attributes")
+    if isinstance(attributes, dict):
+        for key in keys:
+            attr_value = attributes.get(key)
+            if isinstance(attr_value, str):
+                value = attr_value.strip()
+                if value:
+                    return value
+            elif isinstance(attr_value, list):
+                for item in attr_value:
+                    if isinstance(item, str):
+                        value = item.strip()
+                        if value:
+                            return value
+    return None
+
+
+def _normalize_role_value(role: str) -> str:
+    raw = str(role or "").strip()
+    if not raw:
+        return ""
+    alias_map = {
+        "super_admin": "hris:super_admin",
+        "tenant_admin": "hris:tenant_admin",
+        "hr_manager": "hris:hr_manager",
+        "line_manager": "hris:line_manager",
+        "employee": "hris:employee",
+    }
+    return alias_map.get(raw, raw)
+
+
+def _extract_roles(payload: Dict[str, object]) -> List[str]:
+    collected: List[str] = []
+
+    direct_roles = payload.get("roles")
+    if isinstance(direct_roles, list):
+        collected.extend([str(role).strip() for role in direct_roles if str(role).strip()])
+    elif isinstance(direct_roles, str):
+        collected.extend([part.strip() for part in direct_roles.split(",") if part.strip()])
+
+    realm_access = payload.get("realm_access")
+    if isinstance(realm_access, dict):
+        realm_roles = realm_access.get("roles")
+        if isinstance(realm_roles, list):
+            collected.extend([str(role).strip() for role in realm_roles if str(role).strip()])
+
+    resource_access = payload.get("resource_access")
+    if isinstance(resource_access, dict):
+        for client_claim in resource_access.values():
+            if not isinstance(client_claim, dict):
+                continue
+            client_roles = client_claim.get("roles")
+            if isinstance(client_roles, list):
+                collected.extend([str(role).strip() for role in client_roles if str(role).strip()])
+
+    attributes = payload.get("attributes")
+    if isinstance(attributes, dict):
+        attr_roles = attributes.get("roles")
+        if isinstance(attr_roles, list):
+            collected.extend([str(role).strip() for role in attr_roles if str(role).strip()])
+        elif isinstance(attr_roles, str):
+            collected.extend([part.strip() for part in attr_roles.split(",") if part.strip()])
+
+    normalized: List[str] = []
+    seen = set()
+    for role in collected:
+        normalized_role = _normalize_role_value(role)
+        if normalized_role and normalized_role not in seen:
+            seen.add(normalized_role)
+            normalized.append(normalized_role)
+    return normalized
+
+
 def resolve_effective_role(roles: List[str]) -> str:
     for role in HRIS_ROLES:
         if role in roles:
@@ -165,11 +252,12 @@ async def _get_user_keycloak(
 
     payload = _decode_keycloak_token(token)
 
-    tenant_id = payload.get("tenant_id")
-    preferred_username = payload.get("preferred_username") or payload.get("email")
-    email = payload.get("email")
+    tenant_id = _extract_str_claim(payload, "tenant_id", "tenantId")
+    preferred_username = _extract_str_claim(payload, "preferred_username", "username", "upn", "email")
+    email = _extract_str_claim(payload, "email")
     employee_id = payload.get("employee_id")
-    roles = payload.get("roles") or payload.get("realm_access", {}).get("roles", [])
+    roles = _extract_roles(payload)
+    is_platform_superadmin = "hris:super_admin" in roles
 
     if tenant_id is None:
         default_tenant_id = str(get_settings().dev_default_tenant_id or "").strip() or None
@@ -195,11 +283,29 @@ async def _get_user_keycloak(
             if employee_id is None:
                 employee_id = resolved.get("module_user_id")
 
+    # Permit platform-level superadmin tokens that do not include tenant_id.
+    if tenant_id is None and is_platform_superadmin:
+        tenant_id = str(get_settings().dev_default_tenant_id or "").strip() or None
+
     if tenant_id is None or preferred_username is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Token missing required claims (tenant_id or username)",
         )
+
+    # Reconcile SRMS employee identity from persisted identity mappings to avoid
+    # stale token employee_id drift after user migrations or upstream rekeys.
+    resolved_srms_identity = automation_store.resolve_identity_mapping(
+        tenant_id=str(tenant_id),
+        module_name="srms",
+        keycloak_sub=str(payload.get("sub") or "").strip() or None,
+        email=str(email or "").strip().lower() or None,
+        username=str(preferred_username or "").strip().lower() or None,
+    )
+    if isinstance(resolved_srms_identity, dict):
+        mapped_employee_id = str(resolved_srms_identity.get("module_user_id") or "").strip()
+        if mapped_employee_id:
+            employee_id = mapped_employee_id
 
     return AuthenticatedUser(
         sub=payload.get("sub", ""),

@@ -28,6 +28,32 @@ import { isApiDataMode } from '../config/dataMode';
 
 const PIE_COLORS = ['#10b981', '#f59e0b', '#ef4444', '#6b7280'];
 
+function parseLooseDate(input: unknown): Date | null {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+  const normalized = raw.replace(/\s+/g, ' ');
+  const parsedNormalized = new Date(normalized);
+  return Number.isNaN(parsedNormalized.getTime()) ? null : parsedNormalized;
+}
+
+function isOnOrAfterToday(input: unknown): boolean {
+  const value = parseLooseDate(input);
+  if (!value) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(value);
+  target.setHours(0, 0, 0, 0);
+  return target.getTime() >= today.getTime();
+}
+
+function normalizeDateLabel(input: unknown): string {
+  const parsed = parseLooseDate(input);
+  if (!parsed) return '';
+  return parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 function toSafeHttpUrl(raw: string): string | null {
   const value = (raw || '').trim();
   if (!value) return null;
@@ -76,6 +102,7 @@ export const DashboardPage: React.FC = () => {
   const userSub = user?.sub ?? '';
   const isManager = isManagerRole(role);
   const isSuperAdmin = role === HRIS_ROLES.SUPER_ADMIN;
+  const isTenantManager = isManager && !isSuperAdmin;
 
   useEffect(() => {
     let mounted = true;
@@ -91,12 +118,19 @@ export const DashboardPage: React.FC = () => {
   useEffect(() => {
     if (!isApiDataMode || isManager) return;
     let mounted = true;
-    Promise.all([getMyProfile(), getAppraisalModuleData(), getLeaveModuleData()])
-      .then(([profile, appraisal, leave]) => {
+    Promise.allSettled([getMyProfile(), getAppraisalModuleData(), getLeaveModuleData()])
+      .then((results) => {
         if (!mounted) return;
-        setProfileData(profile);
-        setAppraisalData(appraisal);
-        setLeaveData(leave);
+        const [profileResult, appraisalResult, leaveResult] = results;
+        if (profileResult.status === 'fulfilled') {
+          setProfileData(profileResult.value);
+        }
+        if (appraisalResult.status === 'fulfilled') {
+          setAppraisalData(appraisalResult.value);
+        }
+        if (leaveResult.status === 'fulfilled') {
+          setLeaveData(leaveResult.value);
+        }
       })
       .catch(() => {
         // Keep page resilient; top-level summary still loads and drives navigation/actions.
@@ -121,7 +155,7 @@ export const DashboardPage: React.FC = () => {
   }, [role, tenantId, userSub]);
 
   useEffect(() => {
-    if (!isManager) {
+    if (!isTenantManager) {
       setIntegrationSummary(null);
       return;
     }
@@ -130,7 +164,7 @@ export const DashboardPage: React.FC = () => {
       .then((result) => { if (mounted) setIntegrationSummary(result); })
       .catch(() => { if (mounted) setIntegrationSummary(null); });
     return () => { mounted = false; };
-  }, [isManager, role, tenantId, userSub]);
+  }, [isTenantManager, role, tenantId, userSub]);
 
   if (loading) {
     return (
@@ -167,14 +201,62 @@ export const DashboardPage: React.FC = () => {
   const appraisalSections = appraisalData?.employee.sections ?? [];
   const appraisalCompleted = appraisalSections.filter((s) => String(s.status) === 'completed').length;
   const appraisalProgress = appraisalSections.length > 0 ? Math.round((appraisalCompleted / appraisalSections.length) * 100) : 0;
-  const employeeStatus = String(profileData?.employment.status ?? 'Active');
-  const employeeDepartment = String(profileData?.employment.department ?? 'N/A');
-  const employeeBranch = String(profileData?.employment.branch ?? 'N/A');
-  const employeeStaffId = String(profileData?.profile.staffId ?? 'N/A');
+  const valueOr = (value: unknown, fallback: string): string => {
+    const text = String(value ?? '').trim();
+    return text ? text : fallback;
+  };
+  const employeeStatus = valueOr(profileData?.employment.status, 'Active');
+  const employeeDepartment = valueOr(profileData?.employment.department, 'Not set');
+  const employeeBranch = valueOr(profileData?.employment.branch, data.tenant.name);
+  const employeeStaffId = valueOr(profileData?.profile.staffId, valueOr(profileData?.profile.email, data.user.username));
   const annualTotal = Number(annualBalance?.total ?? 0);
   const annualUsed = Number(annualBalance?.used ?? 0);
   const annualPending = Number(annualBalance?.pending ?? 0);
   const annualAvailable = Math.max(0, annualTotal - annualUsed - annualPending);
+  const pendingLeaveEntry = (leaveData?.employee.history ?? [])
+    .find((h) => String(h.status ?? '').toLowerCase() === 'pending' && isOnOrAfterToday(h.endDate ?? h.startDate));
+  const upcomingItems = isApiDataMode ? [
+    ...(appraisalData?.employee.current_cycle?.due_date && isOnOrAfterToday(appraisalData?.employee.current_cycle?.due_date) ? [{
+      label: 'Appraisal self-assessment due',
+      date: normalizeDateLabel(appraisalData.employee.current_cycle.due_date),
+      color: 'text-purple-600 bg-purple-50 dark:text-purple-300 dark:bg-purple-900/30',
+      sortDate: parseLooseDate(appraisalData.employee.current_cycle.due_date),
+    }] : []),
+    ...(pendingLeaveEntry ? [{
+      label: `${String(pendingLeaveEntry.type ?? 'Leave')} request (pending)`,
+      date: `${normalizeDateLabel(pendingLeaveEntry.startDate)} - ${normalizeDateLabel(pendingLeaveEntry.endDate || pendingLeaveEntry.startDate)}`.trim(),
+      color: 'text-amber-600 bg-amber-50 dark:text-amber-300 dark:bg-amber-900/30',
+      sortDate: parseLooseDate(pendingLeaveEntry.startDate),
+    }] : []),
+    ...((leaveData?.employee.holidays ?? [])
+      .filter((entry) => isOnOrAfterToday(entry.date))
+      .map((entry) => ({
+        label: String(entry.name ?? 'Holiday'),
+        date: normalizeDateLabel(entry.date),
+        color: 'text-green-600 bg-green-50 dark:text-green-300 dark:bg-green-900/30',
+        sortDate: parseLooseDate(entry.date),
+      }))),
+  ]
+    .filter((item) => String(item.date ?? '').trim())
+    .sort((a, b) => {
+      const at = a.sortDate instanceof Date ? a.sortDate.getTime() : Number.MAX_SAFE_INTEGER;
+      const bt = b.sortDate instanceof Date ? b.sortDate.getTime() : Number.MAX_SAFE_INTEGER;
+      return at - bt;
+    })
+    .slice(0, 3)
+    : [];
+  const recentItems = isApiDataMode ? [
+    ...((leaveData?.employee.history ?? []).slice(0, 2).map((entry) => ({
+      action: `${String(entry.type ?? 'Leave')} ${String(entry.status ?? 'updated')}`.trim(),
+      detail: `${String(entry.startDate ?? '')} - ${String(entry.endDate ?? '')}`.trim(),
+      time: String(entry.appliedOn ?? 'recently'),
+    }))),
+    ...(appraisalSections.filter((s) => String(s.status ?? '').toLowerCase() === 'completed').slice(0, 1).map((section) => ({
+      action: 'Appraisal section completed',
+      detail: String(section.name ?? 'Section'),
+      time: 'recently',
+    }))),
+  ] : [];
   const enabledModuleIds = new Set(
     catalogModules
       .filter((module) => module.enabled && module.visible)
@@ -203,7 +285,7 @@ export const DashboardPage: React.FC = () => {
       </div>
 
       {/* KPI Stats Grid -- managers and above see org-wide stats */}
-      {isManager && (
+      {isTenantManager && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
           <StatCard label="Total Staff" value={data.srms.total_employees} icon={Users} color="blue" />
           <StatCard label="Active Staff" value={data.srms.active_employees} icon={UserCheck} color="green" />
@@ -214,7 +296,7 @@ export const DashboardPage: React.FC = () => {
         </div>
       )}
 
-      {isManager && integrationSummary && (
+      {isTenantManager && integrationSummary && (
         <div className="card">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-900">Integration Health</h3>
@@ -319,12 +401,13 @@ export const DashboardPage: React.FC = () => {
       )}
 
       {/* Module Cards -- role-differentiated */}
+      {!isSuperAdmin && (
       <div>
         <h2 className="mb-4 text-lg font-semibold text-gray-900">
-          {isManager ? 'HR Modules' : 'My Services'}
+          {isTenantManager ? 'HR Modules' : 'My Services'}
         </h2>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {isManager ? (
+          {isTenantManager ? (
             <>
               {hasSrms && (
                 <ModuleCard
@@ -424,9 +507,10 @@ export const DashboardPage: React.FC = () => {
           )}
         </div>
       </div>
+      )}
 
       {/* Charts -- managers and above */}
-      {isManager && (
+      {isTenantManager && (
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="card">
             <h3 className="mb-4 text-sm font-semibold text-gray-900">Staff Overview</h3>
@@ -472,11 +556,9 @@ export const DashboardPage: React.FC = () => {
           <div className="card">
             <h3 className="mb-4 text-sm font-semibold text-gray-900">Upcoming</h3>
             <div className="space-y-3">
-              {[
-                { label: 'Appraisal self-assessment due', date: 'Mar 30, 2026', color: 'text-purple-600 bg-purple-50' },
-                { label: 'Annual leave request (pending)', date: 'Feb 25 - Feb 27', color: 'text-amber-600 bg-amber-50' },
-                { label: 'Public holiday - Independence Day', date: 'Mar 6, 2026', color: 'text-green-600 bg-green-50' },
-              ].map((item, i) => (
+              {(upcomingItems.length > 0 ? upcomingItems : [
+                { label: 'No upcoming events', date: 'You are up to date', color: 'text-gray-600 bg-gray-100 dark:text-gray-300 dark:bg-gray-800' },
+              ]).map((item, i) => (
                 <div key={i} className="flex items-center justify-between rounded-lg border border-gray-100 p-3">
                   <p className="text-sm text-gray-900">{item.label}</p>
                   <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${item.color}`}>{item.date}</span>
@@ -487,11 +569,11 @@ export const DashboardPage: React.FC = () => {
           <div className="card">
             <h3 className="mb-4 text-sm font-semibold text-gray-900">Recent Activity</h3>
             <div className="space-y-3">
-              {[
+              {(recentItems.length > 0 ? recentItems : [
                 { action: 'Leave request submitted', detail: 'Annual Leave - 3 days', time: '2 hours ago' },
                 { action: 'Appraisal section completed', detail: 'Key Competencies', time: '1 day ago' },
                 { action: 'Leave approved', detail: 'Sick Leave - Dec 15', time: '2 weeks ago' },
-              ].map((item, i) => (
+              ]).map((item, i) => (
                 <div key={i} className="rounded-lg border border-gray-100 p-3">
                   <p className="text-sm font-medium text-gray-900">{item.action}</p>
                   <p className="text-xs text-gray-500">{item.detail} &middot; {item.time}</p>

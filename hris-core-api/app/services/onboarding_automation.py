@@ -259,6 +259,10 @@ def _maybe_export_dev_credentials(
         return ""
     if not export_enabled:
         return ""
+    # Security-first behavior: when welcome email automation is enabled, credentials
+    # should flow through email delivery, not local plaintext exports.
+    if settings.onboarding_welcome_email_enabled or settings.post_deploy_welcome_emails_enabled:
+        return ""
 
     out_dir = Path(str(settings.onboarding_dev_credentials_export_path or "data/exports")).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +364,9 @@ def sync_tenant_users_identity_snapshot(
     errors: List[Dict[str, str]] = []
     max_limit = max(1, min(limit, 5000))
     keycloak_provision_enabled = bool(settings.onboarding_auto_keycloak_provision and _keycloak_admin_is_configured())
+    welcome_email_mode_enabled = bool(
+        settings.onboarding_welcome_email_enabled or settings.post_deploy_welcome_emails_enabled
+    )
     export_enabled = bool(
         settings.onboarding_dev_credentials_export_enabled
         or (
@@ -367,6 +374,8 @@ def sync_tenant_users_identity_snapshot(
             and settings.onboarding_auto_keycloak_provision
         )
     )
+    if welcome_email_mode_enabled:
+        export_enabled = False
     exported_credentials: List[Dict[str, str]] = []
     logger.warning(
         "Tenant identity sync starting: %s",

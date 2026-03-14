@@ -203,6 +203,8 @@ def ensure_user_and_temp_password(
     force_temp_password: bool = False,
     allow_existing_user_password_reset: bool = False,
     send_temp_password: Optional[bool] = None,
+    fixed_password: Optional[str] = None,
+    fixed_password_temporary: bool = False,
 ) -> Dict[str, Optional[str]]:
     settings = get_settings()
     if not settings.keycloak_issuer:
@@ -282,6 +284,20 @@ def ensure_user_and_temp_password(
                 )
 
         temporary_password = None
+        fixed_password_value = str(fixed_password or "").strip()
+        if fixed_password_value and user_id:
+            reset_url = f"{users_url}/{user_id}/reset-password"
+            reset_payload = {"type": "password", "value": fixed_password_value, "temporary": bool(fixed_password_temporary)}
+            reset = client.put(reset_url, headers=headers, json=reset_payload)
+            reset.raise_for_status()
+            return {
+                "status": status,
+                "reason": None,
+                "user_id": user_id,
+                "temporary_password": fixed_password_value if bool(fixed_password_temporary) else None,
+                "password_reset_applied": "true",
+            }
+
         should_set_temp_password = _should_issue_temp_password(
             send_temp_password=send_temp_password_effective,
             user_status=status,

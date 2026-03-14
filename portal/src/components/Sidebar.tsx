@@ -20,17 +20,20 @@ import { httpClient } from '../api/httpClient';
 type SidebarProps = {
   open: boolean;
   onClose: () => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 };
 
-const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+const navLinkClass = ({ isActive, collapsed }: { isActive: boolean; collapsed: boolean }) =>
   clsx(
     'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
+    collapsed && 'justify-center',
     isActive
       ? 'bg-brand-500/10 text-brand-500'
-      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-gray-100'
   );
 
-export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onToggleCollapse }) => {
   const { user } = useAuth();
   const role = user?.effectiveRole ?? HRIS_ROLES.EMPLOYEE;
   const [brandName, setBrandName] = useState('HRIS Portal');
@@ -102,11 +105,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
       )}
       <aside
         className={clsx(
-          'fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-gray-200 bg-white transition-transform lg:static lg:translate-x-0',
+          'fixed inset-y-0 left-0 z-50 flex flex-col border-r border-gray-200 bg-white transition-all lg:static lg:translate-x-0 dark:border-gray-800 dark:bg-gray-900',
+          collapsed ? 'w-20' : 'w-64',
           open ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        <div className="flex h-16 items-center justify-between border-b border-gray-200 px-4">
+        <div className="flex h-16 items-center justify-between border-b border-gray-200 px-4 dark:border-gray-800">
           <div className="flex items-center gap-2">
             {logoPrimaryUri ? (
               <img
@@ -119,29 +123,39 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
                 HR
               </div>
             )}
-            <span className="text-base font-semibold text-gray-900">{brandName}</span>
+            {!collapsed && <span className="text-base font-semibold text-gray-900 dark:text-gray-100">{brandName}</span>}
           </div>
-          <button onClick={onClose} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 lg:hidden">
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="hidden rounded-lg p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 lg:inline-flex"
+            >
+              {collapsed ? <Layers className="h-5 w-5" /> : <X className="h-5 w-5 rotate-45" />}
+            </button>
+            <button onClick={onClose} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 lg:hidden">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-          <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">Overview</p>
-          <NavLink to="/" end className={navLinkClass} onClick={onClose}>
-            <LayoutDashboard className="h-4 w-4" /> Dashboard
+          {!collapsed && <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Overview</p>}
+          <NavLink to="/" end className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title="Dashboard">
+            <LayoutDashboard className="h-4 w-4" /> {!collapsed && 'Dashboard'}
           </NavLink>
 
           {hasMinimumRole(role, HRIS_ROLES.LINE_MANAGER) && (
             <>
-              <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">HR Modules</p>
+              {!collapsed && <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">HR Modules</p>}
               {(visibleModules.length > 0 ? visibleModules : [
                 { id: 'srms', label: 'Staff Records', path: '/employees', icon: Users },
                 { id: 'eappraisal', label: 'Performance Appraisal', path: '/modules/appraisal', icon: ClipboardList },
                 { id: 'eleave', label: 'Leave Management', path: '/modules/leave', icon: CalendarDays },
               ]).map((module) => (
-                <NavLink key={module.id} to={module.path} className={navLinkClass} onClick={onClose}>
-                  <module.icon className="h-4 w-4" /> {module.label}
+                <NavLink key={module.id} to={module.path} className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title={module.label}>
+                  <module.icon className="h-4 w-4" /> {!collapsed && module.label}
                 </NavLink>
               ))}
             </>
@@ -149,9 +163,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
 
           {!hasMinimumRole(role, HRIS_ROLES.LINE_MANAGER) && (
             <>
-              <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">Self Service</p>
-              <NavLink to="/profile" className={navLinkClass} onClick={onClose}>
-                <Users className="h-4 w-4" /> My Profile
+              {!collapsed && <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Self Service</p>}
+              <NavLink to="/profile" className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title="My Profile">
+                <Users className="h-4 w-4" /> {!collapsed && 'My Profile'}
               </NavLink>
               {(visibleModules.filter((module) => module.id !== 'srms').length > 0
                 ? visibleModules.filter((module) => module.id !== 'srms')
@@ -160,8 +174,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
                     { id: 'eleave', label: 'My Leave', path: '/modules/leave', icon: CalendarDays },
                   ]
               ).map((module) => (
-                <NavLink key={module.id} to={module.path} className={navLinkClass} onClick={onClose}>
-                  <module.icon className="h-4 w-4" /> {module.label}
+                <NavLink key={module.id} to={module.path} className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title={module.label}>
+                  <module.icon className="h-4 w-4" /> {!collapsed && module.label}
                 </NavLink>
               ))}
             </>
@@ -169,30 +183,38 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose }) => {
 
           {hasMinimumRole(role, HRIS_ROLES.HR_MANAGER) && (
             <>
-              <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">Reports</p>
-              <NavLink to="/reports" className={navLinkClass} onClick={onClose}>
-                <FileText className="h-4 w-4" /> Reports
+              {!collapsed && <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Reports</p>}
+              <NavLink to="/reports" className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title="Reports">
+                <FileText className="h-4 w-4" /> {!collapsed && 'Reports'}
               </NavLink>
             </>
           )}
 
           {hasMinimumRole(role, HRIS_ROLES.TENANT_ADMIN) && (
             <>
-              <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">Administration</p>
-              <NavLink to="/admin/roles" className={navLinkClass} onClick={onClose}>
-                <Shield className="h-4 w-4" /> Roles & Permissions
+              {!collapsed && <p className="mb-2 mt-6 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Administration</p>}
+              <NavLink to="/admin/roles" className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title="Roles & Permissions">
+                <Shield className="h-4 w-4" /> {!collapsed && 'Roles & Permissions'}
               </NavLink>
-              <NavLink to="/admin/tenants" className={navLinkClass} onClick={onClose}>
-                <Building2 className="h-4 w-4" /> Tenant Management
+              <NavLink to="/admin/tenants" className={({ isActive }) => navLinkClass({ isActive, collapsed })} onClick={onClose} title="Tenant Management">
+                <Building2 className="h-4 w-4" /> {!collapsed && 'Tenant Management'}
               </NavLink>
             </>
           )}
         </nav>
 
-        <div className="border-t border-gray-200 p-4">
-          <div className="rounded-lg bg-gray-50 p-3">
-            <p className="text-sm font-medium text-gray-900">{user?.username}</p>
-            <p className="text-xs text-gray-500">{getRoleLabel(role)}</p>
+        <div className="border-t border-gray-200 p-4 dark:border-gray-800">
+          <div className="rounded-lg bg-gray-50 p-3 dark:bg-gray-800">
+            {!collapsed ? (
+              <>
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{user?.username}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{getRoleLabel(role)}</p>
+              </>
+            ) : (
+              <p className="text-center text-xs font-medium text-gray-500 dark:text-gray-300">
+                {user?.username?.charAt(0)?.toUpperCase() ?? 'U'}
+              </p>
+            )}
           </div>
         </div>
       </aside>

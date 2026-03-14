@@ -6,11 +6,12 @@ A multi-tenant Human Resource Information System that consolidates three indepen
 
 ## Table of Contents
 
+- [Quick Command Cheat Sheet](#quick-command-cheat-sheet)
 1. [Architecture Overview](#1-architecture-overview)
 2. [Component Reference](#2-component-reference)
 3. [Portal Features and Pages](#3-portal-features-and-pages)
-4. [Quick Start with Docker](#4-quick-start-with-docker)
-5. [Development Setup without Docker](#5-development-setup-without-docker)
+4. [Current Startup Guide (Docker)](#4-current-startup-guide-docker)
+5. [Current Startup Guide (Without Docker)](#5-current-startup-guide-without-docker)
 6. [Seeded Data and Login Credentials](#6-seeded-data-and-login-credentials)
 7. [Role System and Permissions](#7-role-system-and-permissions)
 8. [API Reference](#8-api-reference)
@@ -18,6 +19,29 @@ A multi-tenant Human Resource Information System that consolidates three indepen
 10. [Production Deployment Guide](#10-production-deployment-guide)
 11. [Environment Variables](#11-environment-variables)
 12. [Project Structure](#12-project-structure)
+
+---
+
+## Quick Command Cheat Sheet
+
+Use these commands as the safest defaults for first-time setup and repeat runs.
+
+| Scenario | Command | Purpose |
+|----------|---------|---------|
+| Docker first-time env file | `cp .env.docker.prod-like.example .env.docker.prod-like` | Creates editable runtime env for Docker keycloak mode. |
+| Docker first run (recommended) | `python scripts/start_docker_stack.py --keycloak-mode` | Validates compose, starts all services, waits for health, prints running services. |
+| Docker subsequent run (faster) | `python scripts/start_docker_stack.py --keycloak-mode --no-rebuild` | Starts stack without image rebuild for faster iteration. |
+| Docker stop | `docker compose down` | Stops containers while keeping volumes/data. |
+| Docker clean reset | `docker compose down -v` | Stops containers and removes volumes for a fresh environment. |
+| Local Keycloak start (realm import) | `KC_BOOTSTRAP_ADMIN_USERNAME=admin KC_BOOTSTRAP_ADMIN_PASSWORD=admin <kc-bin> start-dev --http-port 8080 --import-realm` | Starts local Keycloak in dev mode with admin bootstrap and realm import. |
+| Local first-time backend deps | `pip install -r tenant-registry-service/requirements.txt && pip install -r hris-core-api/requirements.txt` | Installs Python dependencies for both backend services. |
+| Local first-time frontend deps | `cd portal && npm install && cd ..` | Installs portal dependencies once. |
+| Local run (recommended) | `python scripts/start_local_stack.py --registry-port 8001 --core-port 8000 --portal-port 5173 --timeout 300 --auto-registry-port-fallback` | Starts core, tenant registry, and portal with health gates in one terminal. |
+| Superadmin pre-check | `python scripts/onboard_keycloak_superadmin.py --show-account-identities` | Shows detected operator identity/groups before privileged write. |
+| Superadmin onboarding (secure local) | `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind local --account-auth-mode session --enforce-group-authorization` | Securely creates/updates Keycloak superadmin with confirmation, group authorization, and audit logs. |
+| Superadmin onboarding (secure SSH) | `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind ssh --account-auth-mode session --enforce-group-authorization` | Same secure onboarding flow for SSH operators. |
+| Portal login target (local) | `http://localhost:5173/admin/tenants` | Recommended superadmin landing route after onboarding. |
+| Portal login target (docker) | `http://localhost:3000/admin/tenants` | Recommended superadmin landing route after onboarding. |
 
 ---
 
@@ -373,29 +397,91 @@ Lists seeded tenants with their codes, names, and module enablement status (SRMS
 
 ---
 
-## 4. Quick Start with Docker
+## 4. Current Startup Guide (Docker)
 
-### Prerequisites
+Use this path when you want a production-like environment with Keycloak SSO, Postgres, and all services orchestrated by Compose.
 
-- Docker Desktop (with Docker Compose v2)
-- Ports 3000, 5432, 8000, 8001, 8080 available
-- Optional: create `.env.docker.prod-like` from `.env.docker.prod-like.example` for production-like keycloak mode
+### 4.1 Prerequisites
 
-### Option A: Dev Mode (fastest, no login screen)
+- Docker Desktop (Compose v2)
+- Python 3.9+ (for `scripts/start_docker_stack.py`)
+- free ports: `3000`, `5432`, `8000`, `8001`, `8080`, `5050`
+
+### 4.2 First-Time Docker Setup (one-time)
+
+1. Create runtime env file from example:
 
 ```bash
-docker compose up --build -d
+cp .env.docker.prod-like.example .env.docker.prod-like
 ```
 
-Or use the staged startup helper (PowerShell, Windows):
+Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1
+Copy-Item .env.docker.prod-like.example .env.docker.prod-like
 ```
 
-The helper now performs Docker preflight checks, validates compose configuration before startup, and waits for health endpoints (`tenant-registry`, `hris-core-api`, `portal`) before completing.
+2. Update minimum required values in `.env.docker.prod-like`:
+- `HRIS_AUTH_STATE_SECRET`
+- `HRIS_KEYCLOAK_CLIENT_ID_PORTAL` (normally `hris-portal`)
+- `HRIS_TENANT_REGISTRY_BASIC_AUTH_PASSWORD`
 
-Wait about 60 seconds for all services to start, then open:
+3. Recommended automation settings for first full-stack runs:
+- `HRIS_ENABLE_STARTUP_TENANT_INVENTORY_IMPORT=true`
+- `HRIS_ENABLE_AUTO_SYNC_LOOP=true`
+- `HRIS_ONBOARDING_AUTO_SYNC_NEW_TENANTS=true`
+- `HRIS_ONBOARDING_AUTO_KEYCLOAK_PROVISION=true`
+
+4. Recommended secure credential-delivery settings:
+- `HRIS_ONBOARDING_WELCOME_EMAIL_ENABLED=true`
+- `HRIS_POST_DEPLOY_WELCOME_EMAILS_ENABLED=true`
+- `HRIS_ONBOARDING_SEND_TEMP_PASSWORD_EMAIL=true`
+- `HRIS_ONBOARDING_DEV_CREDENTIALS_EXPORT_ENABLED=false`
+- configure all `HRIS_SMTP_*` values
+
+### 4.3 First Run (recommended command)
+
+```bash
+python scripts/start_docker_stack.py --keycloak-mode
+```
+
+Command purpose:
+- validates compose before startup (`docker compose config -q`)
+- starts stack with wait gates (`--wait`)
+- verifies HTTP readiness (`tenant-registry`, `hris-core-api`, `portal`, `keycloak`)
+- prints `docker compose ps` when complete
+
+Optional wrappers:
+
+```bash
+bash scripts/start-docker-stack.sh --keycloak-mode
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1 -KeycloakMode
+```
+
+### 4.4 Subsequent Docker Runs
+
+Fast restart (skip image rebuild):
+
+```bash
+python scripts/start_docker_stack.py --keycloak-mode --no-rebuild
+```
+
+Stop stack:
+
+```bash
+docker compose down
+```
+
+Full clean reset (containers + volumes):
+
+```bash
+docker compose down -v
+```
+
+### 4.5 Docker URLs
 
 | Service | URL |
 |---------|-----|
@@ -403,167 +489,342 @@ Wait about 60 seconds for all services to start, then open:
 | HRIS Core API Docs | http://localhost:8000/docs |
 | Tenant Registry Docs | http://localhost:8001/docs |
 | Keycloak Admin | http://localhost:8080/admin |
+| pgAdmin | http://localhost:5050 |
 
-In dev mode, the portal auto-authenticates as hr.manager. Use the **Role Switcher** in the navbar to switch between all 5 roles instantly -- no restarts needed.
+### 4.6 Superadmin Onboarding While Using Docker
 
-### Option B: Keycloak SSO Mode (full authentication)
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up --build -d
-```
-
-Or use the staged startup helper with Keycloak mode:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1 -KeycloakMode
-```
-
-For production-like keycloak startup, copy and edit `.env.docker.prod-like.example` first, then run:
-
-```powershell
-Copy-Item .env.docker.prod-like.example .env.docker.prod-like
-powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1 -KeycloakMode
-```
-
-The helper auto-loads `.env.docker.prod-like` by default (override with `-EnvFile` or skip with `-SkipEnvFile`).
-
-Wait about 90 seconds (Keycloak takes longer to import the realm), then open:
-
-| Service | URL |
-|---------|-----|
-| Portal | http://localhost:3000 (HRIS-native sign-in page; no direct Keycloak UI redirect) |
-| Keycloak Admin | http://localhost:8080/admin (admin / admin) |
-
-Log in on the HRIS sign-in page with any seeded Keycloak credentials listed in Section 6.
-
-Important: in `AUTH_MODE=keycloak`, HRIS Core requires either `AUTH_STATE_SECRET` (recommended) or `KEYCLOAK_CLIENT_SECRET_PORTAL`. This is already wired in the updated compose defaults, and should be replaced with strong secrets for non-dev environments.
-
-### Useful Docker Commands
+Run these from repo root on the host machine (the onboarding script calls Keycloak admin APIs over HTTP):
 
 ```bash
-# View logs for all services
+python scripts/onboard_keycloak_superadmin.py --show-account-identities
+```
+
+Purpose: display detected operator identity and groups before enforcement.
+
+Windows recommended secure command:
+
+```powershell
+set HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS=HRIS-Onboarding-Admins,Administrators
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind local --account-auth-mode session --enforce-group-authorization
+```
+
+Linux/macOS recommended secure command:
+
+```bash
+export HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS="hris-onboarding-admins,sudo"
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind ssh --account-auth-mode session --enforce-group-authorization
+```
+
+Purpose: onboard a unique Keycloak user, enforce operator authorization, require interactive confirmation, assign `hris:super_admin`, and write audit records.
+
+After onboarding, sign in at:
+- `http://localhost:3000/admin/tenants` (portal)
+
+### 4.7 Useful Docker Commands
+
+```bash
+# all service logs
 docker compose logs -f
 
-# View logs for a specific service
+# only core logs
 docker compose logs -f hris-core-api
 
-# Restart a single service
+# restart only core
 docker compose restart hris-core-api
-
-# Stop everything
-docker compose down
-
-# Stop and remove all data (fresh start)
-docker compose down -v
-
-# Rebuild a single service
-docker compose up --build -d portal
 ```
 
 ---
 
-## 5. Development Setup without Docker
+## 5. Current Startup Guide (Without Docker)
 
-### Prerequisites
+Use this path when you run services directly on your machine (uvicorn + Vite), without Docker containers.
 
-- Node.js 18+
+### 5.1 Prerequisites
+
 - Python 3.9+
-- PostgreSQL 14+ (only needed if USE_STUB_DATA=false)
+- Node.js 18+
+- npm 9+
+- PostgreSQL 14+ (required when `USE_STUB_DATA=false`; optional for pure stub mode)
 
-### Backend: HRIS Core API
+### 5.2 Install and Run Keycloak Locally (SSO Mode Prerequisite)
 
-```bash
-cd hris-core-api
+If you will run HRIS in `AUTH_MODE=keycloak` without Docker, start Keycloak first before launching other services.
 
-# Create virtual environment (recommended)
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # macOS/Linux
+#### 5.2.1 Install Java 17
 
-# Install dependencies
-pip install -r requirements.txt
+Keycloak requires Java 17+.
 
-# The .env file is already configured for dev mode
-# AUTH_MODE=dev, USE_STUB_DATA=true
+Windows (PowerShell, via winget):
 
-# Start the server
-python -m uvicorn app.main:app --reload --port 8000
+```powershell
+winget install EclipseAdoptium.Temurin.17.JDK
+java -version
 ```
 
-Verify by opening http://localhost:8000/docs for the Swagger UI.
-
-Test endpoints:
+macOS (Homebrew):
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/me
-curl http://localhost:8000/dashboard/summary
-curl http://localhost:8000/employees
-curl http://localhost:8000/employees/e001/summary
+brew install openjdk@17
+java -version
 ```
 
-### Backend: Tenant Registry Service (optional in dev)
-
-Only needed when USE_STUB_DATA=false. The Core API returns stub tenant data in dev mode.
+Ubuntu/Debian:
 
 ```bash
-cd tenant-registry-service
-
-python -m venv venv
-venv\Scripts\activate
-
-pip install -r requirements.txt
-
-# Requires PostgreSQL running with database hris_tenant_registry
-# Edit .env with your DATABASE_URL
-
-python -m uvicorn app.main:app --reload --port 8001
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk curl tar
+java -version
 ```
 
-### Frontend: Portal
+#### 5.2.2 Download and Extract Keycloak
+
+Set a version and install path:
+
+Windows (PowerShell):
+
+```powershell
+$KC_VERSION = "26.1.0"
+$KC_ARCHIVE = "keycloak-$KC_VERSION.zip"
+$KC_URL = "https://github.com/keycloak/keycloak/releases/download/$KC_VERSION/$KC_ARCHIVE"
+Invoke-WebRequest -Uri $KC_URL -OutFile $KC_ARCHIVE
+Expand-Archive -Path $KC_ARCHIVE -DestinationPath .
+$env:KEYCLOAK_HOME = (Resolve-Path ".\keycloak-$KC_VERSION").Path
+```
+
+macOS/Linux:
+
+```bash
+KC_VERSION="26.1.0"
+KC_ARCHIVE="keycloak-${KC_VERSION}.tar.gz"
+KC_URL="https://github.com/keycloak/keycloak/releases/download/${KC_VERSION}/${KC_ARCHIVE}"
+curl -L "$KC_URL" -o "$KC_ARCHIVE"
+tar -xzf "$KC_ARCHIVE"
+export KEYCLOAK_HOME="$PWD/keycloak-${KC_VERSION}"
+```
+
+#### 5.2.3 Import HRIS Realm Configuration
+
+Copy the project realm file into Keycloak import directory:
+
+Windows (PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:KEYCLOAK_HOME\data\import" | Out-Null
+Copy-Item ".\identity\realm-export.json" "$env:KEYCLOAK_HOME\data\import\hris-platform-realm.json"
+```
+
+macOS/Linux:
+
+```bash
+mkdir -p "$KEYCLOAK_HOME/data/import"
+cp "./identity/realm-export.json" "$KEYCLOAK_HOME/data/import/hris-platform-realm.json"
+```
+
+#### 5.2.4 Start Keycloak
+
+Windows (PowerShell):
+
+```powershell
+$env:KC_BOOTSTRAP_ADMIN_USERNAME = "admin"
+$env:KC_BOOTSTRAP_ADMIN_PASSWORD = "admin"
+& "$env:KEYCLOAK_HOME\bin\kc.bat" start-dev --http-port 8080 --import-realm
+```
+
+macOS/Linux:
+
+```bash
+export KC_BOOTSTRAP_ADMIN_USERNAME="admin"
+export KC_BOOTSTRAP_ADMIN_PASSWORD="admin"
+"$KEYCLOAK_HOME/bin/kc.sh" start-dev --http-port 8080 --import-realm
+```
+
+Expected checks:
+- Keycloak admin console: `http://localhost:8080/admin`
+- realm exists: `hris-platform`
+- admin credentials: `admin` / `admin` (change for non-dev use)
+
+#### 5.2.5 Configure HRIS for Local Keycloak
+
+Before starting HRIS services, confirm these values:
+
+`hris-core-api/.env`:
+- `AUTH_MODE=keycloak`
+- `KEYCLOAK_ISSUER=http://localhost:8080/realms/hris-platform`
+- `KEYCLOAK_JWKS_URL=http://localhost:8080/realms/hris-platform/protocol/openid-connect/certs`
+- `KEYCLOAK_CLIENT_ID_PORTAL=hris-portal`
+- `AUTH_STATE_SECRET=<strong-random-value>`
+
+`portal/.env` (or your Vite env source):
+- `VITE_AUTH_MODE=keycloak`
+- `VITE_HRIS_CORE_API_BASE_URL=http://localhost:8000`
+
+### 5.3 First-Time Local Setup (one-time)
+
+Install backend dependencies:
+
+```bash
+pip install -r tenant-registry-service/requirements.txt
+pip install -r hris-core-api/requirements.txt
+```
+
+Install frontend dependencies:
 
 ```bash
 cd portal
-
-# Install dependencies
 npm install
-
-# The .env file is already configured for dev mode
-# VITE_AUTH_MODE=dev, VITE_HRIS_CORE_API_BASE_URL=http://localhost:8000
-
-# Start dev server with hot reload
-npm run dev
+cd ..
 ```
 
-Open http://localhost:5173 in your browser.
+### 5.4 First Run / Daily Run (recommended)
 
-### Running Both Together
-
-Open two terminals:
-
-| Terminal | Command | URL |
-|----------|---------|-----|
-| 1 | `cd hris-core-api && python -m uvicorn app.main:app --reload --port 8000` | http://localhost:8000 |
-| 2 | `cd portal && npm run dev` | http://localhost:5173 |
-
-Recommended one-command local startup (PowerShell, Windows):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start-local-stack.ps1
-```
-
-This command starts services in safe order with health gates:
-1) Tenant Registry (auto-bootstraps DB on first run),
-2) HRIS Core API,
-3) Portal.
-
-Cross-platform one-command local startup (Windows/macOS/Linux):
+Cross-platform local startup:
 
 ```bash
 python scripts/start_local_stack.py --registry-port 8001 --core-port 8000 --portal-port 5173 --timeout 300 --auto-registry-port-fallback
 ```
 
-This avoids shell-specific operators (`&&`) and runs all services in one terminal with prefixed logs; the script also auto-selects a fallback tenant-registry port when requested.
+Windows PowerShell wrapper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-local-stack.ps1
+```
+
+### 5.5 What the Local Startup Command Does
+
+- starts services in controlled order:
+  1. `hris-core-api` (`8000`)
+  2. `tenant-registry` (`8001`)
+  3. `portal` (`5173`)
+- waits for health between stages
+- supports automatic tenant-registry port fallback when requested
+- streams prefixed logs in one terminal
+
+### 5.6 Expected Results (Local)
+
+On successful startup:
+- tenant registry starts and initializes required entities
+- core API starts and serves `/health` + `/docs`
+- portal serves Vite UI at `http://localhost:5173`
+
+Expected URLs:
+
+| Service | URL |
+|---------|-----|
+| Tenant Registry Docs | http://127.0.0.1:8001/docs |
+| HRIS Core API Docs | http://127.0.0.1:8000/docs |
+| Portal | http://127.0.0.1:5173 |
+
+### 5.7 Subsequent Local Runs
+
+Use the same command as first run:
+
+```bash
+python scripts/start_local_stack.py --registry-port 8001 --core-port 8000 --portal-port 5173 --timeout 300 --auto-registry-port-fallback
+```
+
+Stop all services:
+- press `Ctrl+C` in the terminal running `start_local_stack.py`
+
+### 5.8 Manual Local Startup (advanced)
+
+Use this only when debugging individual services or isolating startup failures:
+
+```bash
+# terminal 1
+cd hris-core-api
+python -m uvicorn app.main:app --reload --port 8000
+
+# terminal 2
+cd tenant-registry-service
+python -m uvicorn app.main:app --reload --port 8001
+
+# terminal 3
+cd portal
+npm run dev
+```
+
+### 5.9 Superadmin Onboarding While Running Local Stack
+
+If your local stack is running in Keycloak mode (or your Keycloak is external but reachable), onboarding command is the same:
+
+```bash
+python scripts/onboard_keycloak_superadmin.py --show-account-identities
+```
+
+Purpose: inspect detected operator account + groups before enforcement.
+
+```bash
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind local --account-auth-mode session --enforce-group-authorization
+```
+
+Purpose: securely create/update a Keycloak `hris:super_admin` user with guardrails and audit logging.
+
+If Keycloak is not at default `http://localhost:8080`, pass:
+
+```bash
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --base-url "<keycloak-base-url>" --auth-kind local --account-auth-mode session --enforce-group-authorization
+```
+
+### 5.10 UI Smoke Test Workflow (after startup)
+
+Run this checklist for either local or Docker startup:
+
+1. Open portal:
+- local: `http://localhost:5173`
+- docker: `http://localhost:3000`
+
+2. Verify session/auth entry:
+- dev mode: auto-login or local sign-in appears
+- keycloak mode: HRIS-native sign-in page appears and login succeeds
+
+3. Validate core API reachability:
+- open `http://localhost:8000/docs`
+- call `/health` and `/me`
+
+4. Validate role-aware UI:
+- switch roles (dev mode Role Switcher)
+- confirm dashboard and navigation differ by role
+
+5. Validate key pages:
+- `/` dashboard
+- `/profile`
+- `/employees` (manager roles)
+- `/modules/appraisal`
+- `/modules/leave`
+- `/reports` (HR manager+)
+
+6. Validate interaction flows:
+- submit leave application modal as employee
+- test manager leave approval actions
+- open appraisal page and confirm native/fallback badges
+
+7. Validate backend integration surfaces:
+- `GET /dashboard/summary`
+- `GET /employees`
+- `GET /employees/{id}/summary`
+- `GET /modules/appraisal`
+- `GET /modules/leave`
+
+8. Optional keycloak verification (docker keycloak mode):
+- open Keycloak admin (`http://localhost:8080/admin`)
+- confirm realm `hris-platform` is present
+- verify seeded users can authenticate
+
+### 5.11 Startup Verification Commands
+
+```bash
+# Core health
+curl http://localhost:8000/health
+
+# Tenant registry health
+curl http://localhost:8001/health
+
+# Tenant list (dev credentials)
+curl -u hris_internal:registry_secret http://localhost:8001/tenants
+
+# Dev role simulation
+curl -H "X-Debug-Roles: hris:employee" -H "X-Debug-Username: employee" http://localhost:8000/dashboard/summary
+```
 
 ---
 
@@ -577,6 +838,110 @@ This avoids shell-specific operators (`&&`) and runs all services in one termina
 | Username | admin |
 | Password | admin |
 
+### Secure Superadmin Onboarding Command
+
+Use this workflow to create a dedicated Keycloak user with `hris:super_admin` role, with OS/account verification, group-based authorization, confirmation gates, and audit logging.
+
+```bash
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>"
+```
+
+### Step-by-step (works with Docker or without Docker)
+
+1. Ensure Keycloak is reachable and admin credentials are valid.
+2. Inspect current operator identities/groups:
+
+```bash
+python scripts/onboard_keycloak_superadmin.py --show-account-identities
+```
+
+3. Set allowed operator groups (recommended).
+4. Run secure onboarding command and complete interactive prompts.
+5. Login through portal and verify `Super Admin` dashboard access.
+
+### Recommended Commands and Purpose
+
+| Command | Purpose |
+|---------|---------|
+| `python scripts/onboard_keycloak_superadmin.py --show-account-identities` | Shows detected local/SSH identities and operator groups before any write. |
+| `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind local --account-auth-mode session --enforce-group-authorization` | Standard secure local onboarding flow with group authorization and session trust. |
+| `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind ssh --account-auth-mode session --enforce-group-authorization` | Secure SSH-based onboarding for remote operators. |
+| `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --base-url "<keycloak-base-url>" --auth-kind local --account-auth-mode session --enforce-group-authorization` | Same secure flow against non-default Keycloak endpoint. |
+| `python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --allow-existing --auth-kind local --account-auth-mode session --enforce-group-authorization` | Reconcile an existing Keycloak user and ensure superadmin role/password are updated. |
+
+Windows example:
+
+```powershell
+set HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS=HRIS-Onboarding-Admins,Administrators
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind local --account-auth-mode session --enforce-group-authorization
+```
+
+Linux/macOS example:
+
+```bash
+export HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS="hris-onboarding-admins,sudo"
+python scripts/onboard_keycloak_superadmin.py --username "<preferred-username>" --auth-kind ssh --account-auth-mode session --enforce-group-authorization
+```
+
+Post-onboarding login URLs:
+- local no-docker portal: `http://localhost:5173/admin/tenants`
+- docker portal: `http://localhost:3000/admin/tenants`
+
+What the command enforces by default:
+- prompts for new superadmin password (not echoed)
+- auto-detects execution account and validates operator authority
+- requires confirmation phrase before privileged write
+- checks username/email uniqueness in Keycloak before create
+- assigns realm role `hris:super_admin`
+- writes security audit events (without secrets)
+
+Optional flags:
+- `--email <email>`
+- `--tenant-id <tenant-uuid>`
+- `--allow-existing` (updates role/password for existing account)
+- `--skip-os-auth` (not recommended)
+- `--os-username` / `--os-domain` (override auto-detected OS identity when needed)
+- `--auth-kind auto|local|ssh`
+- `--ssh-auth-host` / `--ssh-auth-port` (for SSH account verification)
+- `--account-auth-mode auto|session|password`
+- `--show-account-identities` (prints detected local/SSH account principals and exits)
+- `--allowed-group <group>` (repeatable allowlist for authorized operators)
+- `--allowed-groups-env <ENV_NAME>` (default: `HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS`)
+- `--enforce-group-authorization` (require membership in allowlisted groups)
+- `--audit-log-path <path>` (JSONL audit file path)
+- `--disable-audit-log` (not recommended)
+
+Audit behavior:
+- writes one JSON line per operation outcome (success/failure)
+- logs operator identity, auth mode/kind, tenant, target username, stage, and error summary
+- never logs passwords
+- default path: `logs/security/superadmin_onboarding_audit.jsonl`
+- override path via `--audit-log-path` or env `HRIS_SUPERADMIN_ONBOARD_AUDIT_LOG_PATH`
+
+Allowed groups intent (why this exists):
+- session auth confirms *who is currently logged in*, but not whether they are allowed to create superadmins
+- allowed groups enforce least privilege by restricting command execution to approved operator groups
+- this reduces insider-risk and accidental privileged user creation from non-admin developer accounts
+- if allowed groups are configured, enforcement is fail-closed (non-members are blocked)
+
+How to add groups:
+- pass groups directly with `--allowed-group` repeatedly
+- or set comma-separated groups in `HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS`
+- on Windows, groups can be full names like `BUILTIN\Administrators` or short names like `Administrators`
+- on Linux/macOS, use local/LDAP group names returned by `id -Gn`
+- use `--show-account-identities` to inspect detected operator groups before enforcing
+- one-time bootstrap behavior:
+  - if enforcement is enabled and allowlist is missing or does not authorize current operator, the command can prompt you to select one detected operator group
+  - it writes the selected group to dedicated tooling env file `.env.superadmin-onboard` (`HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS`) and marks bootstrap done (`HRIS_SUPERADMIN_ONBOARD_GROUP_BOOTSTRAP_DONE=true`)
+  - after bootstrap is marked done, missing/mismatched allowlist fails closed with a clear message until explicitly corrected
+- allowlist values are read from process env first, then fallback env files (`.env.superadmin-onboard`, `hris-core-api/.env`, then repo `.env`) for backward compatibility
+- to persist this beyond the current shell/session, set the environment variable manually in your shell profile or deployment environment
+
+Recommended secure usage:
+- always keep `--enforce-group-authorization` enabled
+- maintain allowlist in environment or dedicated onboarding env file
+- avoid `--skip-os-auth` except tightly controlled break-glass workflows
+
 ### Application Users (Keycloak SSO Mode)
 
 All users belong to the Development Tenant (tenant_id: `11111111-1111-1111-1111-111111111111`).
@@ -588,6 +953,29 @@ All users belong to the Development Tenant (tenant_id: `11111111-1111-1111-1111-
 | hr.manager | Admin@123 | hr.manager@hris.local | hris:hr_manager | HR Dashboard: staff records, appraisals, leaves, reports |
 | line.manager | Admin@123 | line.manager@hris.local | hris:line_manager | Team Dashboard: team members, team appraisals, leave approvals |
 | employee | Admin@123 | employee@hris.local | hris:employee | My Dashboard: self-service profile, appraisals, leave |
+
+### Optional Admin Bootstrap (Local/Non-Production)
+
+If seeded users do not exist in your Keycloak realm, you can bootstrap admin users from environment variables during HRIS Core startup.
+
+Set the following in `hris-core-api/.env` (or process env), then restart `hris-core-api`:
+
+```env
+BOOTSTRAP_ADMIN_ENABLED=true
+BOOTSTRAP_SUPERADMIN_USERNAME=super.admin
+BOOTSTRAP_SUPERADMIN_EMAIL=super.admin@hris.local
+BOOTSTRAP_SUPERADMIN_PASSWORD=<strong-password>
+BOOTSTRAP_SUPERADMIN_TENANT_ID=11111111-1111-1111-1111-111111111111
+BOOTSTRAP_TENANTADMIN_USERNAME=tenant.admin
+BOOTSTRAP_TENANTADMIN_EMAIL=tenant.admin@hris.local
+BOOTSTRAP_TENANTADMIN_PASSWORD=<strong-password>
+BOOTSTRAP_TENANTADMIN_TENANT_ID=11111111-1111-1111-1111-111111111111
+```
+
+Security notes:
+- keep bootstrap credentials out of git-tracked files in shared environments
+- use only in local/dev/staging bootstrap workflows
+- rotate or disable (`BOOTSTRAP_ADMIN_ENABLED=false`) after successful sign-in
 
 ### Dev Mode Role Switcher
 
@@ -1042,7 +1430,7 @@ That guide includes:
 ### Development Workflow
 
 1. Clone the repo
-2. Start both servers: backend (port 8000) and frontend (port 5173)
+2. Start the stack using the startup guides in Section 4 (Docker) or Section 5 (without Docker)
 3. Open http://localhost:5173 (dev mode, no login required)
 4. Use the **Role Switcher** in the navbar to test all 5 role dashboards instantly
 5. Edit `portal/src/` files (hot reload via Vite)
@@ -1051,7 +1439,7 @@ That guide includes:
 8. Test the **Leave Application Modal** as an employee
 9. Test the **Profile Page** tabs as an employee
 10. Test **Staff Records** bulk actions and **Reports** generation as a manager
-11. When ready for SSO testing, use Docker with the keycloak override
+11. When ready for SSO testing, run `python scripts/start_docker_stack.py --keycloak-mode`
 12. Log in as different users to verify role-based views
 
 ### Collaboration Branch Policy (Required)
@@ -1093,8 +1481,8 @@ git merge main
 | Role Switcher not appearing | Verify `VITE_AUTH_MODE=dev` in `portal/.env`. Role Switcher only shows in dev mode. |
 | API returns 401 Unauthorized | In dev mode, ensure `AUTH_MODE=dev` in `hris-core-api/.env`. In keycloak mode, check token expiry. |
 | Role switch doesn't change backend data | Ensure `httpClient.ts` sends `X-Debug-Roles` header and the Core API reads it in `auth.py`. |
-| Docker containers fail to start | Use `powershell -ExecutionPolicy Bypass -File .\scripts\start-docker-stack.ps1` so compose config is pre-validated; then run `docker compose down -v` for a clean start and check port conflicts with `netstat -an`. |
-| Keycloak mode exits during startup | Ensure `.env.docker.prod-like` exists and includes `HRIS_AUTH_STATE_SECRET` (or `HRIS_KEYCLOAK_CLIENT_SECRET_PORTAL`), then rerun with `-KeycloakMode`. |
+| Docker containers fail to start | Use `python scripts/start_docker_stack.py --keycloak-mode` (or the PowerShell wrapper) so compose config and health are validated; then run `docker compose down -v` for a clean reset and check port conflicts with `netstat -an`. |
+| Keycloak mode exits during startup | Ensure `.env.docker.prod-like` exists and includes `HRIS_AUTH_STATE_SECRET` (or `HRIS_KEYCLOAK_CLIENT_SECRET_PORTAL`), then rerun with `python scripts/start_docker_stack.py --keycloak-mode`. |
 | Keycloak realm not imported | Wait 90+ seconds. Check Keycloak logs: `docker compose logs keycloak`; if needed, reset with `docker compose down -v` and start again. |
 | Employee sees Staff Records list | Verify the redirect guard in `EmployeeListPage.tsx` is active and the role resolved correctly. |
 | Profile page shows no data | This is expected in dev mode with stub data. The profile displays hardcoded mock data. |
@@ -1102,11 +1490,14 @@ git merge main
 ### Verifying the Stack
 
 ```bash
-# Check all services are running
+# Docker: check all services are running
 docker compose ps
 
 # Test Core API health
 curl http://localhost:8000/health
+
+# Local: tenant-registry health (same endpoint in Docker)
+curl http://localhost:8001/health
 
 # Test with a specific role (dev mode)
 curl -H "X-Debug-Roles: hris:employee" -H "X-Debug-Username: employee" http://localhost:8000/dashboard/summary
