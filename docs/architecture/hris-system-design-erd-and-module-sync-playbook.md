@@ -3,7 +3,7 @@
 ## 1) Purpose
 
 This document is the implementation-grounded blueprint for the current HRIS codebase and replica production modules.
-
+  
 It covers:
 
 - current architecture and workflow design

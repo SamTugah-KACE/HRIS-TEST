@@ -2,7 +2,7 @@
 ---
 
 ## 3. `docs/architecture/01-identity-and-tenant-model.md`
-
+  
 ```markdown
 # 01 – Identity and Tenant Model
 
