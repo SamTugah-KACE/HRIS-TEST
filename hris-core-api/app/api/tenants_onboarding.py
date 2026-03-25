@@ -17,6 +17,7 @@ from app.services.tenant_branding_service import (
 from app.services.tenant_storage_service import TenantStorageService
 from app.services.tenant_registry_client import get_tenant_mapping, refresh_tenant_mapping_cache
 from app.services.tenant_registry_client import list_tenant_mappings
+from app.services.tenant_registry_client import import_tenant
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -29,6 +30,25 @@ class TenantBrandingUpdate(BaseModel):
 
 class TenantStorageStackUpdate(BaseModel):
     providers: list[Dict[str, Any]]
+
+class TenantOnboardImportIn(BaseModel):
+    tenant_id: Optional[str] = None
+    code: str
+    name: str
+    srms_schema: Optional[str] = None
+    srms_slug: Optional[str] = None
+    eappraisal_subdomain: Optional[str] = None
+    eleave_subdomain: Optional[str] = None
+    is_active: bool = True
+
+@router.post("/onboarding/import")
+def import_tenant_onboarding(
+    payload: TenantOnboardImportIn,
+    user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
+):
+    result = import_tenant(payload.model_dump())
+    body = result.get("payload")
+    return {"imported": True, "result": body}
 
 
 @router.get("")

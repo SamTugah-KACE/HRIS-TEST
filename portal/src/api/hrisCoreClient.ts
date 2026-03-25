@@ -417,6 +417,27 @@ export const uploadTenantLogo = async (
   return r.data;
 };
 
+export type TenantOnboardingImportResponse = {
+  imported: boolean;
+  result: unknown;
+};
+
+export const importTenantOnboarding = async (
+  payload: {
+    tenant_id?: string;
+    code: string;
+    name: string;
+    srms_schema?: string;
+    srms_slug?: string;
+    eappraisal_subdomain?: string;
+    eleave_subdomain?: string;
+    is_active: boolean;
+  }
+): Promise<TenantOnboardingImportResponse> => {
+  const r = await httpClient.post<TenantOnboardingImportResponse>('/tenants/onboarding/import', payload);
+  return r.data;
+};
+
 export const getTenantStorageProviders = async (tenantId: string): Promise<TenantStorageProvidersResponse> => {
   const r = await httpClient.get<TenantStorageProvidersResponse>(`/tenants/${encodeURIComponent(tenantId)}/storage/providers`);
   return r.data;

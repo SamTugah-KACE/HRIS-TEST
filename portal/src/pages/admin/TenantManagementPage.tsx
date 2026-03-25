@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check } from 'lucide-react';
+import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check, Rocket, AlertTriangle } from 'lucide-react';
+import { clsx } from 'clsx';
 import {
   getTenantBranding,
+  importTenantOnboarding,
   resetTenantUserPassword,
   getTenantStorageProviders,
   listTenants,
@@ -17,6 +19,19 @@ import { HRIS_ROLES } from '../../auth/roles';
 export const TenantManagementPage: React.FC = () => {
   const { user } = useAuth();
   const isSuperAdmin = user?.effectiveRole === HRIS_ROLES.SUPER_ADMIN;
+  const [onboardBusy, setOnboardBusy] = useState(false);
+  const [onboardError, setOnboardError] = useState('');
+  const [onboardResult, setOnboardResult] = useState<unknown>(null);
+  const [onboardPayload, setOnboardPayload] = useState({
+    tenant_id: '',
+    code: '',
+    name: '',
+    srms_schema: '',
+    srms_slug: '',
+    eappraisal_subdomain: '',
+    eleave_subdomain: '',
+    is_active: true,
+  });
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState('');
   const [brandName, setBrandName] = useState('');
@@ -46,6 +61,13 @@ export const TenantManagementPage: React.FC = () => {
     resetConfirmationText.trim().toUpperCase() === resetConfirmationPhrase
   );
 
+  const canSubmitOnboarding = Boolean(
+    isSuperAdmin &&
+    onboardPayload.code.trim() &&
+    onboardPayload.name.trim() &&
+    !onboardBusy
+  );
+
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -68,6 +90,33 @@ export const TenantManagementPage: React.FC = () => {
       mounted = false;
     };
   }, [isSuperAdmin, user?.tenantId]);
+
+  const submitOnboarding = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmitOnboarding) return;
+    setOnboardBusy(true);
+    setOnboardError('');
+    setOnboardResult(null);
+    try {
+      const cleaned = {
+        ...onboardPayload,
+        tenant_id: onboardPayload.tenant_id.trim() || undefined,
+        srms_schema: onboardPayload.srms_schema.trim() || undefined,
+        srms_slug: onboardPayload.srms_slug.trim() || undefined,
+        eappraisal_subdomain: onboardPayload.eappraisal_subdomain.trim() || undefined,
+        eleave_subdomain: onboardPayload.eleave_subdomain.trim() || undefined,
+      };
+      const response = await importTenantOnboarding(cleaned);
+      setOnboardResult(response.result ?? response);
+      // Refresh list so the new/updated tenant is visible immediately.
+      const refreshed = await listTenants(500);
+      setTenants(refreshed.tenants || []);
+    } catch {
+      setOnboardError('Failed to import tenant. Check Core API logs and Tenant Registry credentials.');
+    } finally {
+      setOnboardBusy(false);
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -216,6 +265,107 @@ export const TenantManagementPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {isSuperAdmin && (
+        <div className="card">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Tenant onboarding (registry import)</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                Creates/updates a tenant in the Tenant Registry. Module enablement is inferred from routing metadata.
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-2 rounded-lg bg-brand-500/10 px-3 py-2 text-xs font-medium text-brand-600">
+              <Rocket className="h-4 w-4" /> Superadmin
+            </span>
+          </div>
+
+          <form onSubmit={submitOnboarding} className="space-y-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Tenant code</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.code}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, code: e.target.value }))}
+                  required
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Tenant name</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.name}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, name: e.target.value }))}
+                  required
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Tenant ID (optional)</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.tenant_id}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, tenant_id: e.target.value }))}
+                />
+              </label>
+              <label className="flex items-center gap-2 pt-6">
+                <input
+                  type="checkbox"
+                  checked={onboardPayload.is_active}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, is_active: e.target.checked }))}
+                />
+                <span className="text-sm text-gray-700">Active</span>
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">SRMS slug</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.srms_slug}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, srms_slug: e.target.value }))}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">SRMS schema</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.srms_schema}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, srms_schema: e.target.value }))}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">eAppraisal subdomain</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.eappraisal_subdomain}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, eappraisal_subdomain: e.target.value }))}
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">eLeave subdomain</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.eleave_subdomain}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, eleave_subdomain: e.target.value }))}
+                />
+              </label>
+            </div>
+
+            <button className={clsx('btn-primary', onboardBusy && 'opacity-70')} disabled={!canSubmitOnboarding} type="submit">
+              {onboardBusy ? 'Importing…' : 'Import tenant'}
+            </button>
+
+            {onboardError && (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                <AlertTriangle className="mt-0.5 h-4 w-4" /> {onboardError}
+              </div>
+            )}
+            {onboardResult != null ? (
+              <pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
+                {JSON.stringify(onboardResult, null, 2) ?? ''}
+              </pre>
+            ) : null}
+          </form>
+        </div>
+      )}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Tenant Management</h1>
         <p className="mt-1 text-sm text-gray-500">

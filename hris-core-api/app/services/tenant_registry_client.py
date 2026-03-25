@@ -240,3 +240,42 @@ def import_tenant_if_missing(candidate: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(tenant, dict):
         tenant_id = str(tenant.get("tenant_id") or "").strip() or None
     return {"inserted": inserted, "tenant_id": tenant_id, "payload": body}
+
+
+def import_tenant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Import/upsert a tenant into the Tenant Registry via the internal sync endpoint.
+
+    Unlike import_tenant_if_missing(), this function runs even when USE_STUB_DATA=true,
+    because tenant onboarding is a control-plane operation (not a module data read).
+    """
+    settings = get_settings()
+
+    normalized: Dict[str, Any] = {
+        "tenant_id": (str(payload.get("tenant_id") or "").strip() or None),
+        "code": str(payload.get("code") or "").strip(),
+        "name": str(payload.get("name") or "").strip(),
+        "srms_schema": (str(payload.get("srms_schema") or "").strip() or None),
+        "srms_slug": (str(payload.get("srms_slug") or "").strip() or None),
+        "eappraisal_subdomain": (str(payload.get("eappraisal_subdomain") or "").strip() or None),
+        "eleave_subdomain": (str(payload.get("eleave_subdomain") or "").strip() or None),
+        "is_active": bool(payload.get("is_active", True)),
+    }
+    if not normalized["code"] or not normalized["name"]:
+        raise HTTPException(status_code=422, detail="code and name are required")
+
+    url = f"{settings.tenant_registry_base_url}/tenants/sync/import"
+    auth = (settings.tenant_registry_basic_auth_username, settings.tenant_registry_basic_auth_password)
+    try:
+        with httpx.Client(timeout=settings.tenant_registry_timeout_seconds) as client:
+            response = client.post(url, auth=auth, json=normalized)
+            response.raise_for_status()
+            body = response.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to import tenant into Tenant Registry: {exc}",
+        ) from exc
+
+    refresh_tenant_mapping_cache()
+    return {"payload": body}
