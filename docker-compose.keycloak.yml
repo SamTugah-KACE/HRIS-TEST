@@ -9,7 +9,92 @@ services:
   hris-core-api:
     environment:
       AUTH_MODE: keycloak
-      USE_STUB_DATA: "true"
+      # Purpose: Configures use stub data.
+      USE_STUB_DATA: ${HRIS_USE_STUB_DATA:-false}
+      # Purpose: Configures srms payload security mode.
+      SRMS_PAYLOAD_SECURITY_MODE: ${HRIS_SRMS_PAYLOAD_SECURITY_MODE:-auto}
+      # Purpose: Secret/configuration for srms payload signing secret; inject securely and never commit a real value.
+      SRMS_PAYLOAD_SIGNING_SECRET: ${HRIS_SRMS_PAYLOAD_SIGNING_SECRET:-}
+      # Purpose: Secret/configuration for srms payload encryption secret; inject securely and never commit a real value.
+      SRMS_PAYLOAD_ENCRYPTION_SECRET: ${HRIS_SRMS_PAYLOAD_ENCRYPTION_SECRET:-}
+      # Purpose: Secret/configuration for module token secret; inject securely and never commit a real value.
+      MODULE_TOKEN_SECRET: ${HRIS_MODULE_TOKEN_SECRET:-}
+      # Purpose: Configures eappraisal domain template.
+      EAPPRAISAL_DOMAIN_TEMPLATE: ${HRIS_EAPPRAISAL_DOMAIN_TEMPLATE:-}
+      # Purpose: Secret/configuration for eappraisal service token; inject securely and never commit a real value.
+      EAPPRAISAL_SERVICE_TOKEN: ${HRIS_EAPPRAISAL_SERVICE_TOKEN:-}
+      # Purpose: Secret/configuration for eappraisal refresh token; inject securely and never commit a real value.
+      EAPPRAISAL_REFRESH_TOKEN: ${HRIS_EAPPRAISAL_REFRESH_TOKEN:-}
+      # Purpose: Configures eappraisal auto refresh.
+      EAPPRAISAL_AUTO_REFRESH: ${HRIS_EAPPRAISAL_AUTO_REFRESH:-true}
+      # Purpose: Configures eappraisal subdomain header.
+      EAPPRAISAL_SUBDOMAIN_HEADER: ${HRIS_EAPPRAISAL_SUBDOMAIN_HEADER:-}
+      # Purpose: Secret/configuration for eappraisal cookie; inject securely and never commit a real value.
+      EAPPRAISAL_COOKIE: ${HRIS_EAPPRAISAL_COOKIE:-}
+      # Purpose: Network location used for eappraisal integration base url.
+      EAPPRAISAL_INTEGRATION_BASE_URL: ${HRIS_EAPPRAISAL_INTEGRATION_BASE_URL:-}
+      # Purpose: Secret/configuration for eappraisal hris shared secret; inject securely and never commit a real value.
+      EAPPRAISAL_HRIS_SHARED_SECRET: ${HRIS_EAPPRAISAL_HRIS_SHARED_SECRET:-}
+      # Purpose: Secret/configuration for eappraisal hris service token; inject securely and never commit a real value.
+      EAPPRAISAL_HRIS_SERVICE_TOKEN: ${HRIS_EAPPRAISAL_HRIS_SERVICE_TOKEN:-}
+      # Purpose: Configures eleave domain template.
+      ELEAVE_DOMAIN_TEMPLATE: ${HRIS_ELEAVE_DOMAIN_TEMPLATE:-}
+      # Purpose: Secret/configuration for eleave service token; inject securely and never commit a real value.
+      ELEAVE_SERVICE_TOKEN: ${HRIS_ELEAVE_SERVICE_TOKEN:-}
+      # Purpose: Secret/configuration for eleave hris shared secret; inject securely and never commit a real value.
+      ELEAVE_HRIS_SHARED_SECRET: ${HRIS_ELEAVE_HRIS_SHARED_SECRET:-}
+      # Purpose: Secret/configuration for eleave hris service token; inject securely and never commit a real value.
+      ELEAVE_HRIS_SERVICE_TOKEN: ${HRIS_ELEAVE_HRIS_SERVICE_TOKEN:-}
+      # Purpose: Configures eleave use tenant path.
+      ELEAVE_USE_TENANT_PATH: ${HRIS_ELEAVE_USE_TENANT_PATH:-true}
+      # Purpose: Configures module launch expose native urls.
+      MODULE_LAUNCH_EXPOSE_NATIVE_URLS: ${HRIS_MODULE_LAUNCH_EXPOSE_NATIVE_URLS:-false}
+      # Purpose: Configures module launch allow http.
+      MODULE_LAUNCH_ALLOW_HTTP: ${HRIS_MODULE_LAUNCH_ALLOW_HTTP:-false}
+      # Purpose: Configures module launch host suffix allowlist.
+      MODULE_LAUNCH_HOST_SUFFIX_ALLOWLIST: ${HRIS_MODULE_LAUNCH_HOST_SUFFIX_ALLOWLIST:-}
+      # Purpose: Configures module launch open mode.
+      MODULE_LAUNCH_OPEN_MODE: ${HRIS_MODULE_LAUNCH_OPEN_MODE:-same_window}
+      # Purpose: Feature flag controlling module handoff enabled.
+      MODULE_HANDOFF_ENABLED: ${HRIS_MODULE_HANDOFF_ENABLED:-true}
+      # Purpose: Time limit for module handoff ttl seconds, in seconds.
+      MODULE_HANDOFF_TTL_SECONDS: ${HRIS_MODULE_HANDOFF_TTL_SECONDS:-60}
+      # Purpose: Configures module handoff issuer.
+      MODULE_HANDOFF_ISSUER: ${HRIS_MODULE_HANDOFF_ISSUER:-hris-core}
+      # Purpose: Configures module service auth mode.
+      MODULE_SERVICE_AUTH_MODE: ${HRIS_MODULE_SERVICE_AUTH_MODE:-shared_secret}
+      # Purpose: Configures module service jwt issuer.
+      MODULE_SERVICE_JWT_ISSUER: ${HRIS_MODULE_SERVICE_JWT_ISSUER:-}
+      # Purpose: Configures module service jwt audience.
+      MODULE_SERVICE_JWT_AUDIENCE: ${HRIS_MODULE_SERVICE_JWT_AUDIENCE:-hris-core-modules}
+      # Purpose: Secret/configuration for module service jwt shared secret; inject securely and never commit a real value.
+      MODULE_SERVICE_JWT_SHARED_SECRET: ${HRIS_MODULE_SERVICE_JWT_SHARED_SECRET:-}
+      # Purpose: Configures module service jwt algorithms.
+      MODULE_SERVICE_JWT_ALGORITHMS: ${HRIS_MODULE_SERVICE_JWT_ALGORITHMS:-HS256}
+      # Purpose: Configures allow low confidence identity fallback.
+      ALLOW_LOW_CONFIDENCE_IDENTITY_FALLBACK: ${HRIS_ALLOW_LOW_CONFIDENCE_IDENTITY_FALLBACK:-false}
+      # Purpose: Feature flag controlling rate limit enabled.
+      RATE_LIMIT_ENABLED: ${HRIS_RATE_LIMIT_ENABLED:-true}
+      # Purpose: Feature flag controlling enable integration debug endpoints.
+      ENABLE_INTEGRATION_DEBUG_ENDPOINTS: ${HRIS_ENABLE_INTEGRATION_DEBUG_ENDPOINTS:-false}
+      # Purpose: Feature flag controlling enable startup eappraisal tenant inventory import.
+      ENABLE_STARTUP_EAPPRAISAL_TENANT_INVENTORY_IMPORT: ${HRIS_ENABLE_STARTUP_EAPPRAISAL_TENANT_INVENTORY_IMPORT:-false}
+      # Purpose: Configures eappraisal provision user path.
+      EAPPRAISAL_PROVISION_USER_PATH: ${HRIS_EAPPRAISAL_PROVISION_USER_PATH:-/api/hris/v1/integration/tenants/{tenant_id}/users/provision}
+      # Purpose: Configures eleave provision user path.
+      ELEAVE_PROVISION_USER_PATH: ${HRIS_ELEAVE_PROVISION_USER_PATH:-/api/hris/v1/integration/tenants/{tenant_id}/users/provision}
+      # Purpose: Time limit for http client timeout seconds, in seconds.
+      HTTP_CLIENT_TIMEOUT_SECONDS: ${HRIS_HTTP_CLIENT_TIMEOUT_SECONDS:-10}
+      # Purpose: Feature flag controlling enable jit module setup.
+      ENABLE_JIT_MODULE_SETUP: ${HRIS_ENABLE_JIT_MODULE_SETUP:-false}
+      # Purpose: Configures jit auto enable modules.
+      JIT_AUTO_ENABLE_MODULES: ${HRIS_JIT_AUTO_ENABLE_MODULES:-eappraisal,eleave}
+      # Purpose: Feature flag controlling jit auto bootstrap enabled.
+      JIT_AUTO_BOOTSTRAP_ENABLED: ${HRIS_JIT_AUTO_BOOTSTRAP_ENABLED:-true}
+      # Purpose: Configures jit max actions per request.
+      JIT_MAX_ACTIONS_PER_REQUEST: ${HRIS_JIT_MAX_ACTIONS_PER_REQUEST:-10}
+      # Purpose: Time limit for jit cooldown seconds, in seconds.
+      JIT_COOLDOWN_SECONDS: ${HRIS_JIT_COOLDOWN_SECONDS:-30}
 
   portal:
     build:

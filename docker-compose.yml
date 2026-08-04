@@ -1,89 +1,239 @@
 x-hris-core-api-env: &hris_core_api_env
+  # Purpose: Configures app env.
   APP_ENV: ${HRIS_APP_ENV:-development}
-  AUTH_MODE: ${HRIS_AUTH_MODE:-dev}
-  USE_STUB_DATA: ${HRIS_USE_STUB_DATA:-true}
+  # Purpose: Configures auth mode.
+  AUTH_MODE: ${HRIS_AUTH_MODE:-keycloak}
+  # Purpose: Configures use stub data.
+  USE_STUB_DATA: ${HRIS_USE_STUB_DATA:-false}
+  # Purpose: Configures dev default tenant id.
   DEV_DEFAULT_TENANT_ID: ${HRIS_DEV_DEFAULT_TENANT_ID:-11111111-1111-1111-1111-111111111111}
+  # Purpose: Configures dev default username.
   DEV_DEFAULT_USERNAME: ${HRIS_DEV_DEFAULT_USERNAME:-dev.admin}
+  # Purpose: Configures dev default roles.
   DEV_DEFAULT_ROLES: ${HRIS_DEV_DEFAULT_ROLES:-hris:hr_manager}
+  # Purpose: Network location used for tenant registry base url.
   TENANT_REGISTRY_BASE_URL: ${HRIS_TENANT_REGISTRY_BASE_URL:-http://tenant-registry:8000}
+  # Purpose: Configures tenant registry basic auth username.
   TENANT_REGISTRY_BASIC_AUTH_USERNAME: ${HRIS_TENANT_REGISTRY_BASIC_AUTH_USERNAME:-hris_internal}
+  # Purpose: Secret/configuration for tenant registry basic auth password; inject securely and never commit a real value.
   TENANT_REGISTRY_BASIC_AUTH_PASSWORD: ${HRIS_TENANT_REGISTRY_BASIC_AUTH_PASSWORD:-registry_secret}
+  # Purpose: Configures tenant registry allow fallback.
   TENANT_REGISTRY_ALLOW_FALLBACK: ${HRIS_TENANT_REGISTRY_ALLOW_FALLBACK:-false}
+  # Purpose: Numeric runtime limit for tenant registry startup wait retries.
   TENANT_REGISTRY_STARTUP_WAIT_RETRIES: ${HRIS_TENANT_REGISTRY_STARTUP_WAIT_RETRIES:-60}
+  # Purpose: Time limit for tenant registry startup retry delay seconds, in seconds.
   TENANT_REGISTRY_STARTUP_RETRY_DELAY_SECONDS: ${HRIS_TENANT_REGISTRY_STARTUP_RETRY_DELAY_SECONDS:-5}
-  TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN: ${HRIS_TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN:-false}
+  # Purpose: Configures tenant registry startup wait fail open.
+  TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN: ${HRIS_TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN:-true}
+  # Purpose: Configures keycloak issuer.
   KEYCLOAK_ISSUER: ${HRIS_KEYCLOAK_ISSUER:-http://localhost:8080/realms/hris-platform}
+  KEYCLOAK_INTERNAL_BASE_URL: ${HRIS_KEYCLOAK_INTERNAL_BASE_URL:-http://keycloak:8080}
+  # Purpose: Network location used for keycloak jwks url.
   KEYCLOAK_JWKS_URL: ${HRIS_KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/hris-platform/protocol/openid-connect/certs}
-  KEYCLOAK_AUDIENCE_HRIS_CORE: ${HRIS_KEYCLOAK_AUDIENCE_HRIS_CORE:-hris-core-api}
+  # Purpose: Configures keycloak audience hris core.
+  KEYCLOAK_AUDIENCE_HRIS_CORE: ${HRIS_KEYCLOAK_AUDIENCE_HRIS_CORE:-account,hris-core-api,hris-portal}
+  # Purpose: Configures keycloak client id portal.
   KEYCLOAK_CLIENT_ID_PORTAL: ${HRIS_KEYCLOAK_CLIENT_ID_PORTAL:-hris-portal}
+  AUTH_SSO_CALLBACK_URL: ${HRIS_AUTH_SSO_CALLBACK_URL:-http://localhost:8000/auth/sso/callback}
+  KEYCLOAK_MANAGE_PORTAL_CLIENT_SETTINGS: ${HRIS_KEYCLOAK_MANAGE_PORTAL_CLIENT_SETTINGS:-true}
+  # Purpose: Secret/configuration for keycloak client secret portal; inject securely and never commit a real value.
   KEYCLOAK_CLIENT_SECRET_PORTAL: ${HRIS_KEYCLOAK_CLIENT_SECRET_PORTAL:-}
-  PORTAL_BASE_URL: ${HRIS_PORTAL_BASE_URL:-http://localhost:3000}
+  # Purpose: Network location used for portal base url.
+  PORTAL_BASE_URL: ${HRIS_PORTAL_BASE_URL:-http://localhost:5173}
+  # Purpose: Configures cors allowed origins.
   CORS_ALLOWED_ORIGINS: ${HRIS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
-  AUTH_STATE_SECRET: ${HRIS_AUTH_STATE_SECRET:-local-dev-auth-state-secret-change-me}
+  # Purpose: Secret/configuration for auth state secret; inject securely and never commit a real value.
+  AUTH_STATE_SECRET: ${HRIS_AUTH_STATE_SECRET:-}
+  # Purpose: Secret/configuration for auth cookie secure; inject securely and never commit a real value.
   AUTH_COOKIE_SECURE: ${HRIS_AUTH_COOKIE_SECURE:-false}
+  # Purpose: Secret/configuration for auth cookie samesite; inject securely and never commit a real value.
   AUTH_COOKIE_SAMESITE: ${HRIS_AUTH_COOKIE_SAMESITE:-lax}
+  # Purpose: Feature flag controlling auth csrf enabled.
   AUTH_CSRF_ENABLED: ${HRIS_AUTH_CSRF_ENABLED:-true}
+  # Purpose: Configures module adapter mode.
+  # MODULE_ADAPTER_MODE=auto
+  # Purpose: Network location used for srms base url.
   SRMS_BASE_URL: ${HRIS_SRMS_BASE_URL:-https://srms.gi-kace.com.gh}
+  # Purpose: Configures srms app type.
   SRMS_APP_TYPE: ${HRIS_SRMS_APP_TYPE:-superadmin}
+  # Purpose: Secret/configuration for srms auto session token; inject securely and never commit a real value.
   SRMS_AUTO_SESSION_TOKEN: ${HRIS_SRMS_AUTO_SESSION_TOKEN:-true}
+  # Purpose: Secret/configuration for srms integration token; inject securely and never commit a real value.
   SRMS_INTEGRATION_TOKEN: ${HRIS_SRMS_INTEGRATION_TOKEN:-}
+  # Purpose: Secret/configuration for srms service token; inject securely and never commit a real value.
   SRMS_SERVICE_TOKEN: ${HRIS_SRMS_SERVICE_TOKEN:-}
+  # Purpose: Secret/configuration for srms hris shared secret; inject securely and never commit a real value.
   SRMS_HRIS_SHARED_SECRET: ${HRIS_SRMS_HRIS_SHARED_SECRET:-}
+  # Purpose: Secret/configuration for srms hris service token; inject securely and never commit a real value.
   SRMS_HRIS_SERVICE_TOKEN: ${HRIS_SRMS_HRIS_SERVICE_TOKEN:-}
-  ENABLE_STARTUP_TENANT_INVENTORY_IMPORT: ${HRIS_ENABLE_STARTUP_TENANT_INVENTORY_IMPORT:-false}
+  # Purpose: Feature flag controlling enable startup tenant inventory import.
+  ENABLE_STARTUP_TENANT_INVENTORY_IMPORT: ${HRIS_ENABLE_STARTUP_TENANT_INVENTORY_IMPORT:-true}
+  # Purpose: Configures startup tenant inventory max records.
   STARTUP_TENANT_INVENTORY_MAX_RECORDS: ${HRIS_STARTUP_TENANT_INVENTORY_MAX_RECORDS:-500}
-  ENABLE_AUTO_SYNC_LOOP: ${HRIS_ENABLE_AUTO_SYNC_LOOP:-false}
+  # Purpose: Configures tenant reconciliation aliases json.
+  TENANT_RECONCILIATION_ALIASES_JSON: ${HRIS_TENANT_RECONCILIATION_ALIASES_JSON:-{}}
+  # Purpose: Feature flag controlling enable auto sync loop.
+  ENABLE_AUTO_SYNC_LOOP: ${HRIS_ENABLE_AUTO_SYNC_LOOP:-true}
+  # Purpose: Time limit for auto sync interval seconds, in seconds.
   AUTO_SYNC_INTERVAL_SECONDS: ${HRIS_AUTO_SYNC_INTERVAL_SECONDS:-300}
+  # Purpose: Configures auto sync max tenants.
   AUTO_SYNC_MAX_TENANTS: ${HRIS_AUTO_SYNC_MAX_TENANTS:-200}
+  # Purpose: Configures auto sync max users per tenant.
   AUTO_SYNC_MAX_USERS_PER_TENANT: ${HRIS_AUTO_SYNC_MAX_USERS_PER_TENANT:-200}
+  # Purpose: Feature flag controlling enable auto provision.
   ENABLE_AUTO_PROVISION: ${HRIS_ENABLE_AUTO_PROVISION:-false}
+  # Purpose: Configures auto provision dry run.
   AUTO_PROVISION_DRY_RUN: ${HRIS_AUTO_PROVISION_DRY_RUN:-true}
+  # Purpose: Configures auto provision allowed modules.
   AUTO_PROVISION_ALLOWED_MODULES: ${HRIS_AUTO_PROVISION_ALLOWED_MODULES:-eappraisal,eleave}
+  # Purpose: Configures auto provision max actions per run.
   AUTO_PROVISION_MAX_ACTIONS_PER_RUN: ${HRIS_AUTO_PROVISION_MAX_ACTIONS_PER_RUN:-100}
+  # Purpose: Configures auto provision stop on error.
   AUTO_PROVISION_STOP_ON_ERROR: ${HRIS_AUTO_PROVISION_STOP_ON_ERROR:-true}
-  AUTOMATION_STORE_DATABASE_URL: ${HRIS_AUTOMATION_STORE_DATABASE_URL:-postgresql://hris:hris_secret@postgres:5432/hris_tenant_registry}
+  # Purpose: Configures federated directory srms max tenants per run.
+  FEDERATED_DIRECTORY_SRMS_MAX_TENANTS_PER_RUN: ${HRIS_FEDERATED_DIRECTORY_SRMS_MAX_TENANTS_PER_RUN:-25}
+  # Purpose: Time limit for federated directory srms cooldown on 429 seconds, in seconds.
+  FEDERATED_DIRECTORY_SRMS_COOLDOWN_ON_429_SECONDS: ${HRIS_FEDERATED_DIRECTORY_SRMS_COOLDOWN_ON_429_SECONDS:-120}
+  # Purpose: Feature flag controlling enable federated keycloak sync.
+  ENABLE_FEDERATED_KEYCLOAK_SYNC: ${HRIS_ENABLE_FEDERATED_KEYCLOAK_SYNC:-true}
+  # Purpose: Configures startup federated enrollment mode.
+  STARTUP_FEDERATED_ENROLLMENT_MODE: ${HRIS_STARTUP_FEDERATED_ENROLLMENT_MODE:-apply}
+  # Purpose: Configures federated keycloak sync dry run.
+  FEDERATED_KEYCLOAK_SYNC_DRY_RUN: ${HRIS_FEDERATED_KEYCLOAK_SYNC_DRY_RUN:-false}
+  # Purpose: Configures federated keycloak sync max users per run.
+  # 0 processes the complete directory; the durable worker serializes jobs.
+  FEDERATED_KEYCLOAK_SYNC_MAX_USERS_PER_RUN: ${HRIS_FEDERATED_KEYCLOAK_SYNC_MAX_USERS_PER_RUN:-0}
+  ENROLLMENT_WORKER_ENABLED: ${HRIS_ENROLLMENT_WORKER_ENABLED:-true}
+  # Refresh module tenant inventories inside the observable enrollment job, not API startup.
+  ENROLLMENT_REFRESH_TENANT_INVENTORY: ${HRIS_ENROLLMENT_REFRESH_TENANT_INVENTORY:-true}
+  ENROLLMENT_EMAIL_MAX_ATTEMPTS: ${HRIS_ENROLLMENT_EMAIL_MAX_ATTEMPTS:-3}
+  ENROLLMENT_EMAIL_RETRY_BASE_SECONDS: ${HRIS_ENROLLMENT_EMAIL_RETRY_BASE_SECONDS:-30}
+  # Purpose: Feature flag controlling enable federated keycloak welcome email.
+  ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL: ${HRIS_ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL:-true}
+  # Purpose: Secret/configuration for federated keycloak allow existing user password reset; inject securely and never commit a real value.
+  FEDERATED_KEYCLOAK_ALLOW_EXISTING_USER_PASSWORD_RESET: ${HRIS_FEDERATED_KEYCLOAK_ALLOW_EXISTING_USER_PASSWORD_RESET:-false}
+  # Purpose: Network location used for automation store database url.
+  AUTOMATION_STORE_DATABASE_URL: ${HRIS_AUTOMATION_STORE_DATABASE_URL:-postgresql://hris:password@postgres:5432/hris_tenant_registry}
+  # Purpose: Configures automation store schema.
   AUTOMATION_STORE_SCHEMA: ${HRIS_AUTOMATION_STORE_SCHEMA:-hris_automation}
+  # Purpose: Configures db auto create on startup.
   DB_AUTO_CREATE_ON_STARTUP: ${HRIS_DB_AUTO_CREATE_ON_STARTUP:-true}
-  DB_BOOTSTRAP_ADMIN_URL: ${HRIS_DB_BOOTSTRAP_ADMIN_URL:-postgresql://hris:hris_secret@postgres:5432/postgres}
+  # Purpose: Network location used for db bootstrap admin url.
+  DB_BOOTSTRAP_ADMIN_URL: ${HRIS_DB_BOOTSTRAP_ADMIN_URL:-postgresql://hris:password@postgres:5432/postgres}
+  # Purpose: Configures db bootstrap admin database.
   DB_BOOTSTRAP_ADMIN_DATABASE: ${HRIS_DB_BOOTSTRAP_ADMIN_DATABASE:-postgres}
+  # Purpose: Numeric runtime limit for db bootstrap connect retries.
   DB_BOOTSTRAP_CONNECT_RETRIES: ${HRIS_DB_BOOTSTRAP_CONNECT_RETRIES:-5}
+  # Purpose: Time limit for db bootstrap retry delay seconds, in seconds.
   DB_BOOTSTRAP_RETRY_DELAY_SECONDS: ${HRIS_DB_BOOTSTRAP_RETRY_DELAY_SECONDS:-2}
+  # Purpose: Time limit for db bootstrap timeout seconds, in seconds.
   DB_BOOTSTRAP_TIMEOUT_SECONDS: ${HRIS_DB_BOOTSTRAP_TIMEOUT_SECONDS:-5}
+  # Purpose: Time limit for startup pause after db create seconds, in seconds.
+  STARTUP_PAUSE_AFTER_DB_CREATE_SECONDS: ${HRIS_STARTUP_PAUSE_AFTER_DB_CREATE_SECONDS:-0}
+  # Purpose: Feature flag controlling enable post deploy sync automation.
   ENABLE_POST_DEPLOY_SYNC_AUTOMATION: ${HRIS_ENABLE_POST_DEPLOY_SYNC_AUTOMATION:-false}
+  # Purpose: Feature flag controlling post deploy welcome emails enabled.
   POST_DEPLOY_WELCOME_EMAILS_ENABLED: ${HRIS_POST_DEPLOY_WELCOME_EMAILS_ENABLED:-false}
+  # Purpose: Configures onboarding auto sync new tenants.
   ONBOARDING_AUTO_SYNC_NEW_TENANTS: ${HRIS_ONBOARDING_AUTO_SYNC_NEW_TENANTS:-true}
+  # Purpose: Configures onboarding auto keycloak provision.
   ONBOARDING_AUTO_KEYCLOAK_PROVISION: ${HRIS_ONBOARDING_AUTO_KEYCLOAK_PROVISION:-false}
+  # Purpose: Feature flag controlling onboarding welcome email enabled.
   ONBOARDING_WELCOME_EMAIL_ENABLED: ${HRIS_ONBOARDING_WELCOME_EMAIL_ENABLED:-false}
+  # Purpose: Configures onboarding welcome max users per tenant.
   ONBOARDING_WELCOME_MAX_USERS_PER_TENANT: ${HRIS_ONBOARDING_WELCOME_MAX_USERS_PER_TENANT:-2000}
+  # Purpose: Secret/configuration for onboarding send temp password email; inject securely and never commit a real value.
   ONBOARDING_SEND_TEMP_PASSWORD_EMAIL: ${HRIS_ONBOARDING_SEND_TEMP_PASSWORD_EMAIL:-false}
+  # Purpose: Secret/configuration for onboarding temp password length; inject securely and never commit a real value.
   ONBOARDING_TEMP_PASSWORD_LENGTH: ${HRIS_ONBOARDING_TEMP_PASSWORD_LENGTH:-14}
+  # Purpose: Secret/configuration for onboarding dev credentials export enabled; inject securely and never commit a real value.
   ONBOARDING_DEV_CREDENTIALS_EXPORT_ENABLED: ${HRIS_ONBOARDING_DEV_CREDENTIALS_EXPORT_ENABLED:-false}
+  # Purpose: Secret/configuration for onboarding dev credentials export path; inject securely and never commit a real value.
   ONBOARDING_DEV_CREDENTIALS_EXPORT_PATH: ${HRIS_ONBOARDING_DEV_CREDENTIALS_EXPORT_PATH:-data/exports}
+  # Purpose: Secret/configuration for onboarding dev force temp password; inject securely and never commit a real value.
   ONBOARDING_DEV_FORCE_TEMP_PASSWORD: ${HRIS_ONBOARDING_DEV_FORCE_TEMP_PASSWORD:-false}
+  # Purpose: Secret/configuration for expose temporary password in api; inject securely and never commit a real value.
   EXPOSE_TEMPORARY_PASSWORD_IN_API: ${HRIS_EXPOSE_TEMPORARY_PASSWORD_IN_API:-false}
+  # Purpose: Configures storage provider stack.
   STORAGE_PROVIDER_STACK: ${HRIS_STORAGE_PROVIDER_STACK:-s3,local}
+  # Purpose: Time limit for storage healthcheck ttl seconds, in seconds.
   STORAGE_HEALTHCHECK_TTL_SECONDS: ${HRIS_STORAGE_HEALTHCHECK_TTL_SECONDS:-300}
+  # Purpose: Configures media local base path.
   MEDIA_LOCAL_BASE_PATH: ${HRIS_MEDIA_LOCAL_BASE_PATH:-data/media}
+  # Purpose: Configures s3 bucket.
   S3_BUCKET: ${HRIS_S3_BUCKET:-}
+  # Purpose: Configures s3 region.
   S3_REGION: ${HRIS_S3_REGION:-}
+  # Purpose: Secret/configuration for s3 access key id; inject securely and never commit a real value.
   S3_ACCESS_KEY_ID: ${HRIS_S3_ACCESS_KEY_ID:-}
+  # Purpose: Secret/configuration for s3 secret access key; inject securely and never commit a real value.
   S3_SECRET_ACCESS_KEY: ${HRIS_S3_SECRET_ACCESS_KEY:-}
+  # Purpose: Network location used for s3 endpoint url.
   S3_ENDPOINT_URL: ${HRIS_S3_ENDPOINT_URL:-}
+  # Purpose: Configures s3 prefix.
   S3_PREFIX: ${HRIS_S3_PREFIX:-}
-  SMTP_HOST: ${HRIS_SMTP_HOST:-}
+  # Purpose: Network location used for smtp host.
+  SMTP_HOST: ${HRIS_SMTP_HOST:-smtp.gmail.com}
+  # Purpose: Numeric runtime limit for smtp port.
   SMTP_PORT: ${HRIS_SMTP_PORT:-587}
+  # Purpose: Configures smtp username.
   SMTP_USERNAME: ${HRIS_SMTP_USERNAME:-}
+  # Purpose: Secret/configuration for smtp password; inject securely and never commit a real value.
   SMTP_PASSWORD: ${HRIS_SMTP_PASSWORD:-}
+  # Purpose: Configures smtp use tls.
   SMTP_USE_TLS: ${HRIS_SMTP_USE_TLS:-true}
+  # Purpose: Configures smtp use ssl.
+  SMTP_USE_SSL: ${HRIS_SMTP_USE_SSL:-false}
+  # Purpose: Secret/configuration for smtp use credentials; inject securely and never commit a real value.
+  SMTP_USE_CREDENTIALS: ${HRIS_SMTP_USE_CREDENTIALS:-true}
+  # Purpose: Configures smtp validate certs.
+  SMTP_VALIDATE_CERTS: ${HRIS_SMTP_VALIDATE_CERTS:-true}
+  # Purpose: Configures smtp from email.
   SMTP_FROM_EMAIL: ${HRIS_SMTP_FROM_EMAIL:-noreply@hris.local}
+  # Purpose: Secret/configuration for password reset action lifespan seconds; inject securely and never commit a real value.
+  PASSWORD_RESET_ACTION_LIFESPAN_SECONDS: ${HRIS_PASSWORD_RESET_ACTION_LIFESPAN_SECONDS:-900}
+  # Purpose: Secret/configuration for password reset rate limit max; inject securely and never commit a real value.
+  PASSWORD_RESET_RATE_LIMIT_MAX: ${HRIS_PASSWORD_RESET_RATE_LIMIT_MAX:-5}
+  # Purpose: Configures keycloak manage realm email settings.
+  KEYCLOAK_MANAGE_REALM_EMAIL_SETTINGS: ${HRIS_KEYCLOAK_MANAGE_REALM_EMAIL_SETTINGS:-true}
+  KEYCLOAK_EMAIL_THEME: ${HRIS_KEYCLOAK_EMAIL_THEME:-hris-platform}
+  # Purpose: Configures tenant brand name default.
   TENANT_BRAND_NAME_DEFAULT: ${HRIS_TENANT_BRAND_NAME_DEFAULT:-HRIS}
+  # Purpose: Configures tenant support email default.
   TENANT_SUPPORT_EMAIL_DEFAULT: ${HRIS_TENANT_SUPPORT_EMAIL_DEFAULT:-support@hris.local}
+  # Purpose: Configures keycloak realm.
   KEYCLOAK_REALM: ${HRIS_KEYCLOAK_REALM:-hris-platform}
-  KEYCLOAK_ADMIN_CLIENT_ID: ${HRIS_KEYCLOAK_ADMIN_CLIENT_ID:-}
+  # Purpose: Configures keycloak admin client id.
+  KEYCLOAK_ADMIN_CLIENT_ID: ${HRIS_KEYCLOAK_ADMIN_CLIENT_ID:-admin-cli}
+  # Purpose: Secret/configuration for keycloak admin client secret; inject securely and never commit a real value.
   KEYCLOAK_ADMIN_CLIENT_SECRET: ${HRIS_KEYCLOAK_ADMIN_CLIENT_SECRET:-}
-  KEYCLOAK_ADMIN_USERNAME: ${HRIS_KEYCLOAK_ADMIN_USERNAME:-}
-  KEYCLOAK_ADMIN_PASSWORD: ${HRIS_KEYCLOAK_ADMIN_PASSWORD:-}
+  # Purpose: Configures keycloak admin username.
+  KEYCLOAK_ADMIN_USERNAME: ${HRIS_KEYCLOAK_ADMIN_USERNAME:-admin}
+  # Purpose: Secret/configuration for keycloak admin password; inject securely and never commit a real value.
+  KEYCLOAK_ADMIN_PASSWORD: ${HRIS_KEYCLOAK_ADMIN_PASSWORD:-admin}
+  # Purpose: Configures keycloak admin realm.
+  KEYCLOAK_ADMIN_REALM: ${HRIS_KEYCLOAK_ADMIN_REALM:-master}
+  # Purpose: Feature flag controlling bootstrap admin enabled.
+  BOOTSTRAP_ADMIN_ENABLED: ${HRIS_BOOTSTRAP_ADMIN_ENABLED:-false}
+  # Purpose: Configures bootstrap superadmin username.
+  BOOTSTRAP_SUPERADMIN_USERNAME: ${HRIS_BOOTSTRAP_SUPERADMIN_USERNAME:-}
+  # Purpose: Configures bootstrap superadmin email.
+  BOOTSTRAP_SUPERADMIN_EMAIL: ${HRIS_BOOTSTRAP_SUPERADMIN_EMAIL:-}
+  # Purpose: Secret/configuration for bootstrap superadmin password; inject securely and never commit a real value.
+  BOOTSTRAP_SUPERADMIN_PASSWORD: ${HRIS_BOOTSTRAP_SUPERADMIN_PASSWORD:-}
+  # Purpose: Configures bootstrap superadmin tenant id.
+  BOOTSTRAP_SUPERADMIN_TENANT_ID: ${HRIS_BOOTSTRAP_SUPERADMIN_TENANT_ID:-}
+  # Purpose: Configures bootstrap tenantadmin username.
+  BOOTSTRAP_TENANTADMIN_USERNAME: ${HRIS_BOOTSTRAP_TENANTADMIN_USERNAME:-}
+  # Purpose: Configures bootstrap tenantadmin email.
+  BOOTSTRAP_TENANTADMIN_EMAIL: ${HRIS_BOOTSTRAP_TENANTADMIN_EMAIL:-}
+  # Purpose: Secret/configuration for bootstrap tenantadmin password; inject securely and never commit a real value.
+  BOOTSTRAP_TENANTADMIN_PASSWORD: ${HRIS_BOOTSTRAP_TENANTADMIN_PASSWORD:-}
+  # Purpose: Configures bootstrap tenantadmin tenant id.
+  BOOTSTRAP_TENANTADMIN_TENANT_ID: ${HRIS_BOOTSTRAP_TENANTADMIN_TENANT_ID:-}
+  # Purpose: Configures superadmin onboard allowed groups.
   HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS: ${HRIS_SUPERADMIN_ONBOARD_ALLOWED_GROUPS:-}
+  # Purpose: Configures superadmin onboard group bootstrap done.
   HRIS_SUPERADMIN_ONBOARD_GROUP_BOOTSTRAP_DONE: ${HRIS_SUPERADMIN_ONBOARD_GROUP_BOOTSTRAP_DONE:-}
 
 services:
@@ -102,7 +252,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hris"]
+      test: ["CMD-SHELL", "pg_isready -U hris -d hris_tenant_registry"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -111,7 +261,7 @@ services:
 
   # ──────────────── Identity Provider ────────────────
   keycloak:
-    image: quay.io/keycloak/keycloak:24.0
+    image: quay.io/keycloak/keycloak:26.5.4
     container_name: hris-keycloak
     restart: unless-stopped
     command: start-dev --import-realm
@@ -121,19 +271,20 @@ services:
       KC_DB_USERNAME: hris
       KC_DB_PASSWORD: hris_secret
       KC_DB_SCHEMA: keycloak
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-admin}
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_PORT: 8080
     volumes:
       - ./identity:/opt/keycloak/data/import:ro
+      - ./identity/themes/hris-platform:/opt/keycloak/themes/hris-platform:ro
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200\\|UP' <&3"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200\\|UP' <&3"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -144,14 +295,14 @@ services:
   # ──────────────── Tenant Registry ────────────────
   tenant-registry:
     build:
-      context: ./tenant-registry-service
+      context: ./apps/backend/tenant-registry-service
       dockerfile: Dockerfile
     container_name: hris-tenant-registry
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://hris:hris_secret@postgres:5432/hris_tenant_registry
-      INTERNAL_BASIC_AUTH_USERNAME: hris_internal
-      INTERNAL_BASIC_AUTH_PASSWORD: registry_secret
+      INTERNAL_BASIC_AUTH_USERNAME: ${HRIS_TENANT_REGISTRY_BASIC_AUTH_USERNAME:-hris_internal}
+      INTERNAL_BASIC_AUTH_PASSWORD: ${HRIS_TENANT_REGISTRY_BASIC_AUTH_PASSWORD:-registry_secret}
     ports:
       - "8001:8000"
     depends_on:
@@ -169,7 +320,7 @@ services:
   # ──────────────── HRIS Core API ────────────────
   hris-core-api:
     build:
-      context: ./hris-core-api
+      context: ./apps/backend/hris-core-api
       dockerfile: Dockerfile
     container_name: hris-core-api
     restart: unless-stopped
@@ -196,18 +347,44 @@ services:
     networks:
       - hris
 
+  # ──────────────── HRIS GraphQL Gateway ────────────────
+  hris-gateway:
+    build:
+      context: ./apps/backend/gateway
+      dockerfile: Dockerfile
+    container_name: hris-gateway
+    restart: unless-stopped
+    environment:
+      # Purpose: Configures app env.
+      APP_ENV: ${HRIS_GATEWAY_APP_ENV:-development}
+      # Purpose: Network location used for core api base url.
+      CORE_API_BASE_URL: ${HRIS_GATEWAY_CORE_API_BASE_URL:-http://hris-core-api:8000}
+      # Purpose: Time limit for core api timeout seconds, in seconds.
+      CORE_API_TIMEOUT_SECONDS: ${HRIS_GATEWAY_CORE_API_TIMEOUT_SECONDS:-15}
+      # Purpose: Configures cors allowed origins.
+      CORS_ALLOWED_ORIGINS: ${HRIS_GATEWAY_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "8010:8010"
+    depends_on:
+      hris-core-api:
+        condition: service_healthy
+    networks:
+      - hris
+
   # ──────────────── Portal (React) ────────────────
   portal:
     build:
-      context: ./portal
+      context: ./apps/frontend/portal
       dockerfile: Dockerfile
       args:
+        # Purpose: Network location used for hris core api base url.
         VITE_HRIS_CORE_API_BASE_URL: ${PORTAL_VITE_HRIS_CORE_API_BASE_URL:-http://localhost:8000}
+        # Purpose: Configures auth mode.
         VITE_AUTH_MODE: ${PORTAL_VITE_AUTH_MODE:-dev}
     container_name: hris-portal
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${PORTAL_HOST_PORT:-5173}:80"
     depends_on:
       hris-core-api:
         condition: service_healthy
@@ -220,7 +397,9 @@ services:
     container_name: hris-pgadmin
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@hris.local}
+      # Purpose: Configures pgadmin default email.
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      # Purpose: Secret/configuration for pgadmin default password; inject securely and never commit a real value.
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
       PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
     ports:

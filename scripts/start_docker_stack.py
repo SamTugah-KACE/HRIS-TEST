@@ -58,8 +58,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--env-file",
-        default=".env.docker.prod-like",
-        help="Compose env file to load (default: .env.docker.prod-like).",
+        default=".env.docker.development",
+        help="Compose env file to load (default: generated .env.docker.development).",
     )
     parser.add_argument(
         "--skip-env-file",
@@ -84,6 +84,9 @@ def main() -> int:
 
     compose_base_args: list[str] = ["docker", "compose"]
     if not args.skip_env_file:
+        if args.env_file == ".env.docker.development":
+            _print_stage("Refreshing Docker development settings from the Core API .env...")
+            _run([sys.executable, str(repo_root / "scripts" / "prepare_docker_dev_env.py")], cwd=repo_root)
         env_path = repo_root / args.env_file
         if env_path.exists():
             _print_stage(f"Using env file: {args.env_file}")
@@ -119,13 +122,13 @@ def main() -> int:
     _print_stage("HRIS Core API healthy.")
 
     _print_stage("Waiting for Portal...")
-    if not _wait_http_ready("http://127.0.0.1:3000", timeout_seconds=240):
+    if not _wait_http_ready("http://127.0.0.1:5173", timeout_seconds=240):
         raise RuntimeError("Portal did not become reachable in time.")
     _print_stage("Portal reachable.")
 
     if args.keycloak_mode:
         _print_stage("Waiting for Keycloak readiness...")
-        if not _wait_http_ready("http://127.0.0.1:8080/health/ready", timeout_seconds=300):
+        if not _wait_http_ready("http://127.0.0.1:8080/realms/master", timeout_seconds=300):
             raise RuntimeError("Keycloak did not become ready in time.")
         _print_stage("Keycloak ready.")
 

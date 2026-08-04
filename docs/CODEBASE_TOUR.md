@@ -6,42 +6,42 @@ This guide is for beginners: if you have a task, start here to find the right fo
 
 ## “I need to change the UI”
 
-Go to `portal/`.
+Go to `apps/frontend/portal/`.
 
-- **Routes / navigation**: `portal/src/router.tsx`, `portal/src/components/Sidebar.tsx`
-- **Auth UI + role switching (dev mode)**: `portal/src/auth/AuthProvider.tsx`, `portal/src/components/RoleSwitcher.tsx`
-- **API calls to Core**: `portal/src/api/httpClient.ts`, `portal/src/api/hrisCoreClient.ts`
+- **Routes / navigation**: `apps/frontend/portal/src/router.tsx`, `apps/frontend/portal/src/components/Sidebar.tsx`
+- **Auth UI + SSO session wiring**: `apps/frontend/portal/src/auth/AuthProvider.tsx`, `apps/frontend/portal/src/components/RoleSwitcher.tsx`
+- **API calls to Core**: `apps/frontend/portal/src/api/httpClient.ts`, `apps/frontend/portal/src/api/hrisCoreClient.ts`
 - **Key pages**:
-  - Dashboard: `portal/src/pages/DashboardPage.tsx`
-  - Profile (employee self-service): `portal/src/pages/ProfilePage.tsx`
-  - Staff records (managers): `portal/src/pages/EmployeeListPage.tsx`
-  - Employee 360: `portal/src/pages/EmployeeDetailPage.tsx`
-  - Leave: `portal/src/pages/modules/LeavePage.tsx`
-  - Appraisal: `portal/src/pages/modules/AppraisalPage.tsx`
+  - Dashboard: `apps/frontend/portal/src/pages/DashboardPage.tsx`
+  - Profile (employee self-service): `apps/frontend/portal/src/pages/ProfilePage.tsx`
+  - Staff records (managers): `apps/frontend/portal/src/pages/EmployeeListPage.tsx`
+  - Employee 360: `apps/frontend/portal/src/pages/EmployeeDetailPage.tsx`
+  - Leave: `apps/frontend/portal/src/pages/modules/LeavePage.tsx`
+  - Appraisal: `apps/frontend/portal/src/pages/modules/AppraisalPage.tsx`
 
-Beginner tip: If the UI renders but shows “empty” data, check whether `VITE_PORTAL_DATA_MODE` is set to `mock` or `api` in `portal/.env` (see `portal/.env.example`).
+Beginner tip: If the UI renders but shows empty data, check module readiness and Core API errors first. Product runtime should use real Core data, not local mock datasets.
 
 ---
 
 ## “I need to change API behavior / data sent to the portal”
 
-Go to `hris-core-api/`.
+Go to `apps/backend/hris-core-api/`.
 
-- **FastAPI app entrypoint**: `hris-core-api/app/main.py`
-- **Settings/config**: `hris-core-api/app/core/settings.py`
+- **FastAPI app entrypoint**: `apps/backend/hris-core-api/app/main.py`
+- **Settings/config**: `apps/backend/hris-core-api/app/core/settings.py`
 - **Auth + roles**:
-  - Dev headers (`X-Debug-Roles`) and Keycloak validation live under `hris-core-api/app/core/auth.py`
-  - SSO endpoints: `hris-core-api/app/api/auth_sso.py`
+  - Keycloak validation and limited test/debug helpers live under `apps/backend/hris-core-api/app/core/auth.py`
+  - SSO endpoints: `apps/backend/hris-core-api/app/api/auth_sso.py`
 - **Portal-facing endpoints (BFF)**:
-  - Current user: `hris-core-api/app/api/me.py`
-  - Dashboard aggregation: `hris-core-api/app/api/dashboard.py`
-  - Employees list + 360 view: `hris-core-api/app/api/employees.py`
-  - Module pages: `hris-core-api/app/api/modules.py`
+  - Current user: `apps/backend/hris-core-api/app/api/me.py`
+  - Dashboard aggregation: `apps/backend/hris-core-api/app/api/dashboard.py`
+  - Employees list + 360 view: `apps/backend/hris-core-api/app/api/employees.py`
+  - Module pages: `apps/backend/hris-core-api/app/api/modules.py`
 - **Calling production modules**:
-  - “Client” layer: `hris-core-api/app/clients/*_client.py`
-  - Adapter layer (contract alignment / normalization): `hris-core-api/app/adapters/*`
+  - “Client” layer: `apps/backend/hris-core-api/app/clients/*_client.py`
+  - Adapter layer (contract alignment / normalization): `apps/backend/hris-core-api/app/adapters/*`
 
-Beginner tip: When debugging, first decide if you’re in **stub mode** (`USE_STUB_DATA=true`) or **live mode** (`USE_STUB_DATA=false`). Stub mode bypasses real module calls by design.
+Beginner tip: When debugging missing data, check Tenant Registry mapping, module readiness, adapter errors, and service credentials. Product APIs should fail closed instead of returning hardcoded data.
 
 ---
 
@@ -49,36 +49,40 @@ Beginner tip: When debugging, first decide if you’re in **stub mode** (`USE_ST
 
 There are two places depending on what you mean:
 
-- **Tenant Registry service** (source of truth for mappings): `tenant-registry-service/`
-  - Endpoints: `tenant-registry-service/app/api/tenants.py`
-  - DB model: `tenant-registry-service/app/models/tenant.py`
-  - DB bootstrap/init: `tenant-registry-service/app/core/db_bootstrap.py`
-- **Core API behavior using the registry**: `hris-core-api/app/services/tenant_registry_client.py`
+- **Tenant Registry service** (source of truth for mappings): `apps/backend/tenant-registry-service/`
+  - Endpoints: `apps/backend/tenant-registry-service/app/api/tenants.py`
+  - DB model: `apps/backend/tenant-registry-service/app/models/tenant.py`
+  - DB bootstrap/init: `apps/backend/tenant-registry-service/app/core/db_bootstrap.py`
+- **Core API behavior using the registry**: `apps/backend/hris-core-api/app/services/tenant_registry_client.py`
 
 ---
 
 ## “I need to change login/roles (Keycloak)”
 
 - **Realm export**: `identity/realm-export.json`
-- **Core API SSO proxy**: `hris-core-api/app/api/auth_sso.py`
-- **Portal Keycloak wiring**: `portal/src/keycloak.ts`
+- **Core API SSO proxy**: `apps/backend/hris-core-api/app/api/auth_sso.py`
+- **Portal SSO/session wiring**: `apps/frontend/portal/src/auth/AuthProvider.tsx`
+- `apps/frontend/portal/src/keycloak.ts` is a legacy/direct-adapter helper and
+  is not the authoritative normal-runtime session flow.
 
-Important: The repo supports two auth modes:
+Important: Keycloak is the expected mode for production-like development:
 
-- `dev`: fast local work, no real SSO required
 - `keycloak`: real SSO and token validation
+- `dev`: limited debug mode only for isolated tests or emergency local diagnostics
 
 ---
 
 ## “I need to run or troubleshoot the stack”
 
-Start with the wrappers (they add health checks + clearer output):
+Use the current launch paths:
 
 - Local: `scripts/start_local_stack.py` (and `scripts/start-local-stack.ps1`)
-- Docker: `scripts/start_docker_stack.py` (and `scripts/start-docker-stack.ps1`)
+- Docker: generate `.env.docker.development` with
+  `scripts/prepare_docker_dev_env.py`, then run the root Compose files with
+  `--wait` as shown in `docs/START_HERE.md`.
 
 Docs:
 
 - `README.md` (most common commands)
 - `docs/ops/env-variables.md` (how env is organized)
-
+- `docs/ops/enrollment-jobs-email-and-keycloak-reset.md` (tenant/user enrollment, email, and job diagnosis)

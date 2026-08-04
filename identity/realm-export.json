@@ -1,13 +1,21 @@
 {
   "realm": "hris-platform",
   "enabled": true,
+  "emailTheme": "hris-platform",
   "sslRequired": "none",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
   "resetPasswordAllowed": true,
+  "verifyEmail": true,
   "editUsernameAllowed": false,
   "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "maxDeltaTimeSeconds": 43200,
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername(undefined) and passwordHistory(5)",
   "accessTokenLifespan": 1800,
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 36000,
@@ -116,7 +124,7 @@
       "lastName": "Admin",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "Admin@123", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "ChangeMe@12345", "temporary": true }],
       "realmRoles": ["hris:super_admin", "default-roles-hris-platform"],
       "attributes": { "tenant_id": ["11111111-1111-1111-1111-111111111111"] }
     },
@@ -127,7 +135,7 @@
       "lastName": "Administrator",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "Admin@123", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "ChangeMe@12345", "temporary": true }],
       "realmRoles": ["hris:tenant_admin", "default-roles-hris-platform"],
       "attributes": { "tenant_id": ["11111111-1111-1111-1111-111111111111"] }
     },
@@ -138,7 +146,7 @@
       "lastName": "Mensah",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "Admin@123", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "ChangeMe@12345", "temporary": true }],
       "realmRoles": ["hris:hr_manager", "default-roles-hris-platform"],
       "attributes": { "tenant_id": ["11111111-1111-1111-1111-111111111111"] }
     },
@@ -149,7 +157,7 @@
       "lastName": "Osei",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "Admin@123", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "ChangeMe@12345", "temporary": true }],
       "realmRoles": ["hris:line_manager", "default-roles-hris-platform"],
       "attributes": { "tenant_id": ["11111111-1111-1111-1111-111111111111"] }
     },
@@ -160,7 +168,7 @@
       "lastName": "Asante",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "Admin@123", "temporary": false }],
+      "credentials": [{ "type": "password", "value": "ChangeMe@12345", "temporary": true }],
       "realmRoles": ["hris:employee", "default-roles-hris-platform"],
       "attributes": { "tenant_id": ["2f61e1c2-e39b-4dee-8fe5-8e22d63fac1e"] }
     }

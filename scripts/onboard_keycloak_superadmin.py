@@ -30,6 +30,8 @@ REPO_ROOT = SCRIPT_DIR.parent
 TOOLING_ENV_FILE = REPO_ROOT / ".env.superadmin-onboard"
 ENV_FILE_CANDIDATES = [
     TOOLING_ENV_FILE,
+    REPO_ROOT / "apps" / "backend" / "hris-core-api" / ".env",
+    REPO_ROOT / "apps" / "hris-core-api" / ".env",
     REPO_ROOT / "hris-core-api" / ".env",
     REPO_ROOT / ".env",
 ]

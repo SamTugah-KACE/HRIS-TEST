@@ -1,7 +1,7 @@
 param(
     [switch]$KeycloakMode = $false,
     [switch]$Rebuild = $true,
-    [string]$EnvFile = ".env.docker.prod-like",
+    [string]$EnvFile = ".env.docker.development",
     [switch]$SkipEnvFile = $false,
     [int]$WaitTimeoutSeconds = 300,
     [switch]$SkipComposeWait = $false

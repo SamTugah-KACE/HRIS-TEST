@@ -2,9 +2,9 @@
 
 The **canonical source of truth** for “what env vars exist” is the example file next to each component:
 
-- Portal: `portal/.env.example`
-- HRIS Core API: `hris-core-api/.env.example`
-- Tenant Registry: `tenant-registry-service/.env.example`
+- Portal: `apps/frontend/portal/.env.example`
+- HRIS Core API: `apps/backend/hris-core-api/.env.example`
+- Tenant Registry: `apps/backend/tenant-registry-service/.env.example`
 
 This doc explains how to think about those variables without needing to already know the system.
 
@@ -18,33 +18,50 @@ This doc explains how to think about those variables without needing to already 
 
 ---
 
-## Portal (`portal/`)
+## Portal (`apps/frontend/portal/`)
 
-See `portal/.env.example`.
+See `apps/frontend/portal/.env.example`.
 
 The Portal runs in your browser. It needs to know where the Core API is and which auth mode to use.
 
 - **`VITE_HRIS_CORE_API_BASE_URL`**: Core API base URL (typical local: `http://localhost:8000`)
-- **`VITE_AUTH_MODE`**: `dev` (no SSO) or `keycloak` (SSO)
-- **`VITE_PORTAL_DATA_MODE`**: `mock` (UI uses local datasets) or `api` (UI is driven by Core API)
-- **`VITE_DEV_DEFAULT_TENANT_ID`** / **`VITE_DEV_DEFAULT_EMPLOYEE_ID`**: defaults used in dev mode
+- **`VITE_AUTH_MODE`**: use `keycloak` for production-like development and deployed environments.
+- **`VITE_PORTAL_DATA_MODE`**: use `api`; local mock datasets are not a product runtime path.
+- **`VITE_DEV_DEFAULT_TENANT_ID`** / **`VITE_DEV_DEFAULT_EMPLOYEE_ID`**: legacy debug defaults only.
 
 ---
 
-## HRIS Core API (`hris-core-api/`)
+## HRIS Core API (`apps/backend/hris-core-api/`)
 
-See `hris-core-api/.env.example`.
+See `apps/backend/hris-core-api/.env.example`.
+
+For Docker development, run `python scripts/prepare_docker_dev_env.py`. It maps
+the local Core `.env` into the ignored root `.env.docker.development` file and
+replaces localhost-only service addresses with Docker DNS names. Re-run it
+after changing the Core `.env`; never commit the generated file.
+
+Enrollment controls:
+
+- `STARTUP_FEDERATED_ENROLLMENT_MODE`: `disabled`, `discover`, or `apply`;
+  startup only queues the durable job.
+- `ENROLLMENT_WORKER_ENABLED`: enables the durable enrollment worker.
+- `ENROLLMENT_REFRESH_TENANT_INVENTORY`: refreshes SRMS/eAppraisal tenants
+  inside global enrollment jobs before user discovery.
+- `FEDERATED_KEYCLOAK_SYNC_MAX_USERS_PER_RUN`: `0` means all discovered users;
+  a positive value is an explicit canary limit.
+- Keep both `ENABLE_STARTUP_*_TENANT_INVENTORY_IMPORT` flags false in the normal
+  workflow so remote module discovery never gates API readiness.
 
 Think of Core API as a “translator and aggregator” for the Portal.
 
 ### Mode switches (first things to check)
 
 - **`AUTH_MODE`**:
-  - `dev`: trusts debug headers (fast local iteration)
-  - `keycloak`: validates Keycloak JWTs using JWKS (real SSO)
+  - `keycloak`: validates Keycloak JWTs using JWKS (expected mode)
+  - `dev`: limited debug mode for isolated diagnostics only
 - **`USE_STUB_DATA`**:
-  - `true`: return realistic stub payloads (no module dependencies)
-  - `false`: call SRMS / eAppraisal / eLeave live
+  - `false`: required. Core calls Tenant Registry and real module integrations.
+  - `true`: deprecated for product runtime; do not use for normal development.
 
 ### Keycloak (only when `AUTH_MODE=keycloak`)
 
@@ -60,17 +77,19 @@ Think of Core API as a “translator and aggregator” for the Portal.
 - **`TENANT_REGISTRY_BASIC_AUTH_USERNAME`**
 - **`TENANT_REGISTRY_BASIC_AUTH_PASSWORD`**
 
-### Module integration targets (only when `USE_STUB_DATA=false`)
+### Module integration targets
 
 - **`SRMS_BASE_URL`**
 - **`EAPPRAISAL_DOMAIN_TEMPLATE`** (example: `https://appraisal.{subdomain}.com.gh`)
 - **`ELEAVE_DOMAIN_TEMPLATE`** (example: `https://{subdomain}.eleave.com.gh`)
+- **`MODULE_HANDOFF_ENABLED`**: should be `true`.
+- **`MODULE_LAUNCH_EXPOSE_NATIVE_URLS`**: should be `false`; Portal launches native UIs through handoff.
 
 ---
 
-## Tenant Registry (`tenant-registry-service/`)
+## Tenant Registry (`apps/backend/tenant-registry-service/`)
 
-See `tenant-registry-service/.env.example`.
+See `apps/backend/tenant-registry-service/.env.example`.
 
 Tenant Registry is the mapping store: `tenant_id` → “how to reach this tenant in each module”.
 
@@ -87,4 +106,3 @@ If you’re confused about “what is actually set at runtime”, check:
 
 - `docker-compose.yml` (what containers receive)
 - the component’s `.env.example` (what local runs expect)
-

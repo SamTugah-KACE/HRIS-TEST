@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres-tenant-registry:
     image: postgres:15
@@ -8,6 +6,7 @@ services:
     environment:
       POSTGRES_DB: hris_tenant_registry
       POSTGRES_USER: hris_tenant_registry
+      # Purpose: Secret/configuration for postgres password; inject securely and never commit a real value.
       POSTGRES_PASSWORD: ${TENANT_REGISTRY_DB_PASSWORD}
     volumes:
       - tenant_registry_db_data:/var/lib/postgresql/data
@@ -22,13 +21,16 @@ services:
 
   tenant-registry-service:
     build:
-      context: ../tenant-registry-service
+      context: ../apps/backend/tenant-registry-service
       dockerfile: Dockerfile
     container_name: tenant-registry-service
     restart: unless-stopped
     environment:
+      # Purpose: Network location used for database url.
       DATABASE_URL: postgresql://hris_tenant_registry:${TENANT_REGISTRY_DB_PASSWORD}@postgres-tenant-registry:5432/hris_tenant_registry
+      # Purpose: Configures internal basic auth username.
       INTERNAL_BASIC_AUTH_USERNAME: ${TENANT_REGISTRY_BASIC_AUTH_USERNAME}
+      # Purpose: Secret/configuration for internal basic auth password; inject securely and never commit a real value.
       INTERNAL_BASIC_AUTH_PASSWORD: ${TENANT_REGISTRY_BASIC_AUTH_PASSWORD}
     depends_on:
       postgres-tenant-registry:
@@ -50,15 +52,24 @@ services:
       start --optimized
       --http-port=8080
     environment:
+      # Purpose: Configures keycloak admin.
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      # Purpose: Secret/configuration for keycloak admin password; inject securely and never commit a real value.
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
       KC_DB: postgres
+      # Purpose: Network location used for kc db url host.
       KC_DB_URL_HOST: ${KEYCLOAK_DB_HOST}
+      # Purpose: Configures kc db url database.
       KC_DB_URL_DATABASE: ${KEYCLOAK_DB_NAME}
+      # Purpose: Configures kc db username.
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      # Purpose: Secret/configuration for kc db password; inject securely and never commit a real value.
       KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
       KC_PROXY: edge
+      # Purpose: Configures kc hostname.
       KC_HOSTNAME: ${KEYCLOAK_EXTERNAL_HOSTNAME}
+    volumes:
+      - ../identity/themes/hris-platform:/opt/keycloak/themes/hris-platform:ro
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200\\|UP' <&3"]
       interval: 10s
@@ -70,25 +81,33 @@ services:
 
   hris-core-api:
     build:
-      context: ../hris-core-api
+      context: ../apps/backend/hris-core-api
       dockerfile: Dockerfile
     container_name: hris-core-api
     restart: unless-stopped
     environment:
       # Keycloak
+      # Purpose: Configures keycloak issuer.
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER}
+      # Purpose: Network location used for keycloak jwks url.
       KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL}
+      # Purpose: Configures keycloak audience hris core.
       KEYCLOAK_AUDIENCE_HRIS_CORE: ${KEYCLOAK_AUDIENCE_HRIS_CORE}
 
       # Tenant Registry
       TENANT_REGISTRY_BASE_URL: http://tenant-registry-service:8000
       TENANT_REGISTRY_TIMEOUT_SECONDS: 5
+      # Purpose: Configures tenant registry basic auth username.
       TENANT_REGISTRY_BASIC_AUTH_USERNAME: ${TENANT_REGISTRY_BASIC_AUTH_USERNAME}
+      # Purpose: Secret/configuration for tenant registry basic auth password; inject securely and never commit a real value.
       TENANT_REGISTRY_BASIC_AUTH_PASSWORD: ${TENANT_REGISTRY_BASIC_AUTH_PASSWORD}
 
       # External module hosts (prod/stage URLs)
+      # Purpose: Network location used for srms base url.
       SRMS_BASE_URL: ${SRMS_BASE_URL}                          # e.g. https://srms.gi-kace.com.gh
+      # Purpose: Configures eappraisal domain template.
       EAPPRAISAL_DOMAIN_TEMPLATE: ${EAPPRAISAL_DOMAIN_TEMPLATE}# e.g. https://appraisal.{subdomain}.com.gh
+      # Purpose: Configures eleave domain template.
       ELEAVE_DOMAIN_TEMPLATE: ${ELEAVE_DOMAIN_TEMPLATE}        # e.g. https://{subdomain}.eleave.com.gh
 
       HTTP_CLIENT_TIMEOUT_SECONDS: 5
@@ -106,17 +125,40 @@ services:
     networks:
       - hris_net
 
+  hris-gateway:
+    build:
+      context: ../apps/backend/gateway
+      dockerfile: Dockerfile
+    container_name: hris-gateway
+    restart: unless-stopped
+    environment:
+      # Purpose: Configures app env.
+      APP_ENV: ${HRIS_GATEWAY_APP_ENV:-production}
+      CORE_API_BASE_URL: http://hris-core-api:8000
+      CORE_API_TIMEOUT_SECONDS: 15
+      # Purpose: Configures cors allowed origins.
+      CORS_ALLOWED_ORIGINS: ${HRIS_GATEWAY_CORS_ALLOWED_ORIGINS}
+    depends_on:
+      hris-core-api:
+        condition: service_healthy
+    networks:
+      - hris_net
+
   portal:
     build:
-      context: ../portal
+      context: ../apps/frontend/portal
       dockerfile: Dockerfile
     container_name: hris-portal
     restart: unless-stopped
     environment:
       # The portal itself will use these to talk to hris-core-api and keycloak
+      # Purpose: Network location used for react app hris core api base url.
       REACT_APP_HRIS_CORE_API_BASE_URL: ${HRIS_CORE_API_PUBLIC_BASE_URL}
+      # Purpose: Network location used for react app keycloak url.
       REACT_APP_KEYCLOAK_URL: ${KEYCLOAK_PUBLIC_BASE_URL}
+      # Purpose: Configures react app keycloak realm.
       REACT_APP_KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      # Purpose: Configures react app keycloak client id.
       REACT_APP_KEYCLOAK_CLIENT_ID: ${KEYCLOAK_PORTAL_CLIENT_ID}
     depends_on:
       hris-core-api:
@@ -129,7 +171,9 @@ services:
     container_name: hris-pgadmin
     restart: unless-stopped
     environment:
+      # Purpose: Configures pgadmin default email.
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@hris.local}
+      # Purpose: Secret/configuration for pgadmin default password; inject securely and never commit a real value.
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
       PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
     ports:

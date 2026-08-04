@@ -13,6 +13,19 @@ from urllib.parse import urlparse
 from urllib.request import ProxyHandler, build_opener
 
 
+def resolve_app_dir(repo_root: Path, legacy_name: str) -> Path:
+    grouped_paths = {
+        "portal": repo_root / "apps" / "frontend" / "portal",
+        "hris-core-api": repo_root / "apps" / "backend" / "hris-core-api",
+        "tenant-registry-service": repo_root / "apps" / "backend" / "tenant-registry-service",
+    }
+    apps_path = grouped_paths.get(legacy_name, repo_root / "apps" / legacy_name)
+    legacy_path = repo_root / legacy_name
+    if apps_path.exists():
+        return apps_path
+    return legacy_path
+
+
 def is_port_available(host: str, port: int) -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -198,6 +211,12 @@ def main() -> int:
     parser.add_argument("--registry-port", type=int, default=8001)
     parser.add_argument("--core-port", type=int, default=8000)
     parser.add_argument("--portal-port", type=int, default=5173)
+    parser.add_argument("--gateway-port", type=int, default=8010)
+    parser.add_argument(
+        "--with-gateway",
+        action="store_true",
+        help="Start GraphQL gateway service (apps/backend/gateway).",
+    )
     parser.add_argument("--timeout", type=int, default=240, help="Health wait timeout per stage (seconds).")
     parser.add_argument(
         "--auto-registry-port-fallback",
@@ -207,9 +226,22 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
-    registry_dir = repo_root / "tenant-registry-service"
-    core_dir = repo_root / "hris-core-api"
-    portal_dir = repo_root / "portal"
+    registry_dir = resolve_app_dir(repo_root, "tenant-registry-service")
+    core_dir = resolve_app_dir(repo_root, "hris-core-api")
+    portal_dir = resolve_app_dir(repo_root, "portal")
+    gateway_dir = repo_root / "apps" / "backend" / "gateway"
+
+    for name, path in (
+        ("tenant-registry-service", registry_dir),
+        ("hris-core-api", core_dir),
+        ("portal", portal_dir),
+    ):
+        if not path.exists():
+            print(f"[STACK] Required app directory is missing for '{name}': {path}")
+            return 1
+    if args.with_gateway and not gateway_dir.exists():
+        print(f"[STACK] Required app directory is missing for 'gateway': {gateway_dir}")
+        return 1
 
     python_exe = sys.executable
     npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
@@ -281,6 +313,27 @@ def main() -> int:
         print("[STACK] Portal reachable.")
     else:
         print("[STACK] Stage 3/4: skipped Portal (--no-portal).")
+
+    if args.with_gateway:
+        print("[STACK] Stage 4/4: starting GraphQL Gateway...")
+        gateway = _start_process_with_env(
+            prefix="GATEWAY",
+            command=[python_exe, "-m", "uvicorn", "app.main:app", "--reload", "--port", str(args.gateway_port)],
+            cwd=gateway_dir,
+            env_overrides={
+                "CORE_API_BASE_URL": f"http://127.0.0.1:{args.core_port}",
+            },
+        )
+        procs.append(gateway)
+        if not wait_stage_ready(
+            stage_name="GraphQL Gateway",
+            process=gateway,
+            url=f"http://127.0.0.1:{args.gateway_port}/health",
+            timeout_seconds=args.timeout,
+        ):
+            terminate_processes(procs)
+            return 1
+        print("[STACK] GraphQL Gateway healthy.")
 
     print("[STACK] Startup complete. Press Ctrl+C to stop all services.")
     try:
