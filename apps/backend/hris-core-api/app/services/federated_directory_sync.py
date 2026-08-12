@@ -54,6 +54,12 @@ def _roles_from_federated_user(user: Dict[str, Any]) -> List[str]:
     for source in sources.values():
         claims = source.get("claims") if isinstance(source, dict) and isinstance(source.get("claims"), dict) else {}
         role_values.append(str(claims.get("role_name") or "").strip().lower())
+        permissions = claims.get("permissions") if isinstance(claims.get("permissions"), list) else []
+        normalized_permissions = {str(value or "").strip().lower() for value in permissions}
+        if "hr:dashboard" in normalized_permissions:
+            role_values.append("hr manager")
+        elif "staff:dashboard" in normalized_permissions:
+            role_values.append("staff")
     aliases = {
         "hr manager": "hris:hr_manager",
         "hr_manager": "hris:hr_manager",
@@ -89,6 +95,7 @@ def _safe_user_claims_from_srms(row: Dict[str, Any]) -> Dict[str, Any]:
         "name": str(row.get("name") or row.get("full_name") or "").strip(),
         "is_active": bool(row.get("is_active", True)),
         "role_name": str(row.get("role") or row.get("role_name") or "").strip(),
+        "permissions": list(row.get("permissions") or []) if isinstance(row.get("permissions"), list) else [],
     }
 
 
@@ -483,6 +490,7 @@ def sync_keycloak_from_federated_directory(
                 user_id = str(out.get("user_id") or "").strip()
                 if user_id:
                     automation_store.record_identity_mapping(
+                        keycloak_issuer=str(settings.keycloak_issuer or "").rstrip("/") or None,
                         keycloak_sub=user_id,
                         tenant_id=t_id,
                         module_name="keycloak",

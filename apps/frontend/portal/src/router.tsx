@@ -3,9 +3,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProfileHubPage } from './pages/ProfileHubPage';
-import { EmployeeListPage } from './pages/EmployeeListPage';
 import { EmployeeDetailPage } from './pages/EmployeeDetailPage';
-import { AppraisalPage } from './pages/modules/AppraisalPage';
 import { LeavePage } from './pages/modules/LeavePage';
 import { ModuleWorkspacePage } from './pages/modules/ModuleWorkspacePage';
 import { RolesPage } from './pages/admin/RolesPage';
@@ -20,10 +18,10 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <DashboardPage /> },
       { path: 'profile', element: <ProfileHubPage /> },
-      { path: 'employees', element: <EmployeeListPage /> },
-      { path: 'employees/team', element: <EmployeeListPage /> },
+      { path: 'employees', element: <ModuleWorkspacePage fixedModuleId="srms" /> },
+      { path: 'employees/team', element: <ModuleWorkspacePage fixedModuleId="srms" /> },
       { path: 'employees/:employeeId', element: <EmployeeDetailPage /> },
-      { path: 'modules/appraisal', element: <AppraisalPage /> },
+      { path: 'modules/appraisal', element: <ModuleWorkspacePage fixedModuleId="eappraisal" /> },
       { path: 'modules/leave', element: <LeavePage /> },
       { path: 'modules/:moduleId/native', element: <ModuleWorkspacePage /> },
       { path: 'reports', element: <ReportsPage /> },

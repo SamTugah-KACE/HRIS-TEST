@@ -215,15 +215,22 @@ def _map_permissions_to_hris_roles(raw_permissions: Any) -> List[str]:
             mapped = "hris:super_admin"
         elif compact.endswith(":admin") or "organization:update" in compact or "tenant:admin" in compact:
             mapped = "hris:tenant_admin"
+        elif compact == "hr:dashboard":
+            # SRMS has two native personas. hr:dashboard is the authoritative
+            # high-authority/HR UI capability; staff:dashboard is self-service.
+            mapped = "hris:hr_manager"
         elif "employee:update" in compact or "employee:write" in compact or "reports:view" in compact:
             mapped = "hris:hr_manager"
         elif "approval" in compact or "appraisal:review" in compact or "leave:approve" in compact:
             mapped = "hris:line_manager"
-        elif "employee:read" in compact or "self:" in compact or compact.endswith(":view"):
+        elif compact == "staff:dashboard" or "employee:read" in compact or "self:" in compact or compact.endswith(":view"):
             mapped = "hris:employee"
         if mapped and mapped not in resolved:
             resolved.append(mapped)
-    return [role for role in _HRIS_ROLE_PRIORITY if role in resolved]
+    ordered = [role for role in _HRIS_ROLE_PRIORITY if role in resolved]
+    if "hris:hr_manager" in ordered and "hris:employee" in ordered:
+        ordered.remove("hris:employee")
+    return ordered
 
 
 def _resolve_hris_roles_from_user_row(row: Dict[str, Any]) -> List[str]:
@@ -232,8 +239,20 @@ def _resolve_hris_roles_from_user_row(row: Dict[str, Any]) -> List[str]:
 
 
 def _resolve_hris_roles_with_source(row: Dict[str, Any]) -> Tuple[List[str], str]:
-    # Precedence required by SRMS handoff contract:
-    # role_code -> permissions -> role_name/legacy labels
+    # SRMS defines its two personas by dashboard permission, irrespective of
+    # the tenant's editable role label/code. Honor that authoritative signal first.
+    permission_roles = _map_permissions_to_hris_roles(
+        row.get("permissions") if "permissions" in row else row.get("raw_permissions")
+    )
+    dashboard_permissions = set(_flatten_permission_strings(
+        row.get("permissions") if "permissions" in row else row.get("raw_permissions")
+    ))
+    if "hr:dashboard" in dashboard_permissions:
+        return ["hris:hr_manager"], "permissions"
+    if "staff:dashboard" in dashboard_permissions:
+        return ["hris:employee"], "permissions"
+
+    # Other integrations retain the established role_code -> permission -> role label order.
     role_code_roles = []
     for code in _tokenize_role_value(row.get("role_code")):
         mapped = _map_source_role_to_hris(code)
@@ -242,9 +261,6 @@ def _resolve_hris_roles_with_source(row: Dict[str, Any]) -> Tuple[List[str], str
     if role_code_roles:
         return [role for role in _HRIS_ROLE_PRIORITY if role in role_code_roles], "role_code"
 
-    permission_roles = _map_permissions_to_hris_roles(
-        row.get("permissions") if "permissions" in row else row.get("raw_permissions")
-    )
     if permission_roles:
         return permission_roles, "permissions"
 
@@ -367,23 +383,27 @@ def persist_identity_from_user(user: AuthenticatedUser) -> None:
     if not tenant_id:
         return
     by_module = {
-        "srms": str(user.token_claims.get("srms_employee_id") or user.employee_id or user.username or "").strip(),
-        "eappraisal": str(user.token_claims.get("eappraisal_employee_id") or user.employee_id or user.username or "").strip(),
-        "eleave": str(user.token_claims.get("eleave_employee_id") or user.employee_id or user.username or "").strip(),
+        # Only module-specific immutable IDs are authenticated links.  A portal
+        # username/email (or an employee ID from another module) is discovery
+        # evidence and must never silently become a cross-module identity.
+        "srms": str(user.token_claims.get("srms_employee_id") or "").strip(),
+        "eappraisal": str(user.token_claims.get("eappraisal_employee_id") or "").strip(),
+        "eleave": str(user.token_claims.get("eleave_employee_id") or "").strip(),
     }
     for module_name, module_user_id in by_module.items():
         if not module_user_id:
             continue
         try:
             automation_store.record_identity_mapping(
+                keycloak_issuer=str(user.token_claims.get("iss") or "").rstrip("/") or None,
                 keycloak_sub=user.sub,
                 tenant_id=tenant_id,
                 module_name=module_name,
                 module_user_id=module_user_id,
                 module_username=user.username,
                 email=user.email,
-                source="keycloak_claim_or_fallback",
-                confidence="medium",
+                source="signed_keycloak_module_claim",
+                confidence="high",
             )
         except Exception as exc:
             logger.warning("Identity mapping persistence skipped for %s: %s", module_name, exc)
@@ -516,6 +536,7 @@ def sync_tenant_users_identity_snapshot(
                 keycloak_user_id = str(keycloak_result.get("user_id") or "").strip()
                 if keycloak_user_id:
                     automation_store.record_identity_mapping(
+                        keycloak_issuer=str(settings.keycloak_issuer or "").rstrip("/") or None,
                         keycloak_sub=keycloak_user_id,
                         tenant_id=write_tenant_id,
                         module_name="srms",
@@ -526,6 +547,13 @@ def sync_tenant_users_identity_snapshot(
                         confidence="high",
                     )
                     keycloak_linked += 1
+                    automation_store.upsert_tenant_membership(
+                        keycloak_issuer=str(settings.keycloak_issuer or "").rstrip("/"),
+                        keycloak_sub=keycloak_user_id,
+                        canonical_tenant_id=write_tenant_id,
+                        status="active",
+                        source="srms_inventory_keycloak_link",
+                    )
                     temp_password = str(keycloak_result.get("temporary_password") or "").strip()
                     if export_enabled:
                         exported_credentials.append(

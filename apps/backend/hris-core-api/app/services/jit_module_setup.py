@@ -5,13 +5,12 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from app.clients import eappraisal_client
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
 from app.services.identity_resolution import resolve_canonical_identity
 from app.services import automation_store
 from app.services.jit_policy import get_jit_role_mapping
-from app.services.tenant_match_engine import TenantMatchDecision, evaluate_strict_tenant_match
+from app.services.tenant_match_engine import TenantMatchDecision
 from app.services.tenant_registry_client import get_tenant_mapping, import_tenant, refresh_tenant_mapping_cache
 
 
@@ -66,9 +65,23 @@ def _auto_enable_module_if_needed(*, tenant_id: str, module_name: str) -> Dict[s
     # Strict isolation mode: never infer an existing target tenant by loose matching.
     patch: Dict[str, Any] = {"tenant_id": mapping.tenant_id, "code": mapping.code, "name": mapping.name, "is_active": True}
     if module == "eappraisal":
-        patch["eappraisal_subdomain"] = mapping.eappraisal_subdomain or mapping.code
+        if not str(mapping.eappraisal_subdomain or "").strip():
+            return {
+                "enabled": False,
+                "changed": False,
+                "module": module,
+                "reason": "missing_verified_tenant_projection",
+            }
+        patch["eappraisal_subdomain"] = mapping.eappraisal_subdomain
     if module == "eleave":
-        patch["eleave_subdomain"] = mapping.eleave_subdomain or mapping.code
+        if not str(mapping.eleave_subdomain or "").strip():
+            return {
+                "enabled": False,
+                "changed": False,
+                "module": module,
+                "reason": "missing_verified_tenant_projection",
+            }
+        patch["eleave_subdomain"] = mapping.eleave_subdomain
     import_tenant(patch)
     refresh_tenant_mapping_cache()
     mapping2 = get_tenant_mapping(tenant_id)
@@ -105,10 +118,15 @@ def _resolve_target_tenant_decision(*, module_name: str, mapping: Any, run_id: O
 
     source_profile = _source_org_profile(mapping)
     if module == "eappraisal":
-        inventory = eappraisal_client.list_integration_tenants(None, limit=2000)
-        candidates = inventory.get("tenants", []) if isinstance(inventory, dict) else []
-        candidates = [r for r in candidates if isinstance(r, dict)]
-        decision = evaluate_strict_tenant_match(source_profile=source_profile, candidate_rows=candidates)
+        # HRIS does not discover Appraisal tenants through module APIs. The
+        # registry supplies only the iframe routing slug; native identity and
+        # authorization are resolved by Appraisal during handoff redemption.
+        target_ref = str(mapping.eappraisal_subdomain or "").strip() or None
+        decision = TenantMatchDecision(
+            decision="reuse_existing" if target_ref else "create_new",
+            target_tenant_ref=target_ref,
+            evidence={"source": "tenant_registry_iframe_route"},
+        )
     else:
         # eLeave provisioning endpoint can create tenant when absent.
         decision = TenantMatchDecision(
@@ -174,85 +192,14 @@ def _call_provision_user(
         return last  # type: ignore[return-value]
 
     if module == "eappraisal":
-        # Preferred path: call eAppraisal integration provisioning endpoint when configured.
-        # Contract-aware fallback: if not configured/reachable, validate via inventory only.
-        rm = get_jit_role_mapping(tenant_id=mapping.tenant_id)
-        can_call_provision = bool(
-            str(settings.eappraisal_integration_base_url or "").strip()
-            and str(settings.eappraisal_hris_shared_secret or "").strip()
-            and str(settings.eappraisal_provision_user_path or "").strip()
-        )
-        if tenant_decision.decision != "reuse_existing":
-            return {
-                "ok": False,
-                "status": "create_new_needed",
-                "detail": "Strict tenant match not found for eAppraisal. Create a new target tenant before user provisioning.",
-                "http_status": 409,
-                "payload": {"tenant_decision": tenant_decision.decision, "evidence": tenant_decision.evidence},
-            }
-        if can_call_provision:
-            url = f"{str(settings.eappraisal_integration_base_url).rstrip('/')}{settings.eappraisal_provision_user_path}".format(
-                tenant_id=tenant_decision.target_tenant_ref or mapping.tenant_id
-            )
-            headers = {
-                "X-Request-ID": actor.request_id or "",
-                "X-Client-App": "hris-core",
-                "X-Client-Version": "jit",
-                "X-HRIS-Tenant-Id": mapping.tenant_id,
-                "X-HRIS-User-Sub": actor.sub or "",
-                "X-HRIS-Role": (actor.roles[0] if actor.roles else "hris:employee"),
-                "X-HRIS-Shared-Secret": str(settings.eappraisal_hris_shared_secret or ""),
-            }
-            if settings.eappraisal_hris_service_token:
-                headers["X-HRIS-Service-Token"] = str(settings.eappraisal_hris_service_token)
-            body = {
-                "email": canonical_email or "",
-                "first_name": actor.first_name or "",
-                "last_name": actor.last_name or "",
-                "username": canonical_username or "",
-                "employee_id": canonical_emp or "",
-                "role_id": rm.eappraisal_role_id,
-                "role_name": rm.eappraisal_role_name or "STAFF",
-                "dry_run": bool(dry_run),
-                **contract_payload,
-                **seed_payload,
-            }
-            resp = _request_with_retries(method="POST", url=url, headers=headers, json_body=body)
-            payload = resp.json() if resp.content else {}
-            return {
-                "ok": resp.status_code < 400,
-                "status": "provisioned_upstream" if resp.status_code < 400 else "upstream_provision_failed",
-                "http_status": resp.status_code,
-                "payload": {**(payload if isinstance(payload, dict) else {}), "target_tenant_ref": tenant_decision.target_tenant_ref},
-            }
-
-        users_payload = eappraisal_client.list_integration_tenant_users(mapping, None, limit=2000)
-        rows = users_payload.get("users", []) if isinstance(users_payload, dict) else []
-        rows = [r for r in rows if isinstance(r, dict)]
-        email = canonical_email
-        emp = canonical_emp
-        username = canonical_username
-
-        def _row_matches(row: Dict[str, Any]) -> bool:
-            r_email = str(row.get("email") or "").strip().lower()
-            r_emp = str(row.get("employee_id") or "").strip().lower()
-            r_user = str(row.get("username") or "").strip().lower()
-            return bool((email and r_email == email) or (emp and r_emp == emp) or (username and r_user == username))
-
-        matched = next((r for r in rows if _row_matches(r)), None)
-        if not matched:
-            return {
-                "ok": False,
-                "status": "inventory_only_not_found",
-                "detail": "User not found in eAppraisal tenant users inventory, and provisioning endpoint is not configured.",
-                "http_status": 404,
-                "payload": {"tenant_id": users_payload.get("tenant_id"), "total_users": len(rows)},
-            }
         return {
             "ok": True,
-            "status": "existing_in_inventory",
+            "status": "iframe_handoff_only",
             "http_status": 200,
-            "payload": {"status": "existing_in_inventory", "user": matched, "target_tenant_ref": tenant_decision.target_tenant_ref},
+            "payload": {
+                "status": "iframe_handoff_only",
+                "detail": "Appraisal identity and native session initialization occur inside the iframe handoff.",
+            },
         }
 
     if module == "eleave":
@@ -320,6 +267,7 @@ def _upsert_identity_link_after_jit(
         return
     try:
         automation_store.record_identity_mapping(
+            keycloak_issuer=str(actor.token_claims.get("iss") or "").rstrip("/") or None,
             keycloak_sub=str(actor.sub or "").strip() or None,
             tenant_id=tenant_id,
             module_name=str(module_name or "").strip().lower(),
@@ -410,4 +358,3 @@ def jit_setup_module_for_user(
         "provision": provision_out,
         "dry_run": effective_dry_run,
     }
-

@@ -79,7 +79,9 @@ def evaluate_strict_tenant_match(
                 or ""
             ).strip() or None
             return TenantMatchDecision(
-                decision="reuse_existing",
+                # Descriptive agreement creates a review candidate only. It
+                # never authorizes a cross-module tenant link.
+                decision="candidate",
                 target_tenant_ref=target_ref,
                 evidence={"matched_fields": list(required), "source": src, "target": tgt},
             )

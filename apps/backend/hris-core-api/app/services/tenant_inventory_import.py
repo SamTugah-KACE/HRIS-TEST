@@ -1,4 +1,5 @@
 import json
+import unicodedata
 from typing import Any, Dict, List
 
 from fastapi import HTTPException, status
@@ -6,12 +7,39 @@ from fastapi import HTTPException, status
 from app.clients import srms_client
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
-from app.services.tenant_registry_client import import_tenant_if_missing, list_tenant_mappings
+from app.services.tenant_registry_client import list_tenant_mappings
+from app.services import automation_store
 from app.clients import eappraisal_client
 
 
 def _as_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _normalized_label(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", _as_str(value)).casefold().split())
+
+
+def _record_explicit_projection(module_name: str, candidate: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Activate only a native record carrying an exact existing canonical UUID."""
+    canonical_id = _as_str(candidate.get("canonical_tenant_id"))
+    if not canonical_id:
+        return
+    canonical_ids = {str(row.tenant_id) for row in list_tenant_mappings(limit=5000)}
+    if canonical_id not in canonical_ids:
+        raise RuntimeError("Native tenant reports an unknown canonical_tenant_id")
+    automation_store.upsert_module_projection(
+        canonical_tenant_id=canonical_id,
+        module_name=module_name,
+        native_tenant_id=_as_str(candidate.get("tenant_id")),
+        state="verified",
+        routing={
+            "routing_key": _as_str(candidate.get("srms_slug") or candidate.get("eappraisal_subdomain")),
+            "proof_type": "native_persisted_canonical_id",
+            "source_version": _as_str(source.get("identity_version") or source.get("version")),
+        },
+        verified=True,
+    )
 
 
 def _apply_explicit_reconciliation_alias(candidate: Dict[str, Any], module_name: str) -> Dict[str, Any]:
@@ -28,7 +56,10 @@ def _apply_explicit_reconciliation_alias(candidate: Dict[str, Any], module_name:
     if not target_ref:
         return candidate
     target_norm = target_ref.lower()
-    target = next((row for row in list_tenant_mappings(limit=5000) if target_norm in {row.tenant_id.lower(), row.code.lower(), row.name.lower()}), None)
+    # Alias values must resolve to an immutable canonical tenant UUID. Display
+    # names and codes are neither globally unique nor stable and must never
+    # authorize a cross-module tenant merge.
+    target = next((row for row in list_tenant_mappings(limit=5000) if target_norm == row.tenant_id.lower()), None)
     if target is None:
         raise RuntimeError(f"Configured tenant reconciliation target '{target_ref}' was not found")
     resolved = dict(candidate)
@@ -41,10 +72,16 @@ def _normalize_srms_org(org: Dict[str, Any]) -> Dict[str, Any]:
     tenant_url = _as_str(org.get("tenant_url")) or _as_str(org.get("access_url"))
     return {
         "tenant_id": _as_str(org.get("tenant_id")) or None,
+        "canonical_tenant_id": _as_str(org.get("canonical_tenant_id")) or None,
         "code": _as_str(org.get("code")) or srms_slug or tenant_url or _as_str(org.get("name")),
         "name": _as_str(org.get("name")) or _as_str(org.get("code")) or "Unknown Tenant",
         "srms_slug": srms_slug or None,
-        "srms_schema": _as_str(org.get("schema")) or _as_str(org.get("srms_schema")) or None,
+        "srms_schema": (
+            _as_str(org.get("srms_schema"))
+            or _as_str(org.get("schema_name"))
+            or _as_str(org.get("schema"))
+            or None
+        ),
         "is_active": _as_str(org.get("status")).lower() != "inactive",
     }
 
@@ -80,16 +117,24 @@ def import_missing_tenants_from_srms(actor: AuthenticatedUser, *, max_records: i
 
     for org in organizations:
         scanned += 1
-        candidate = _apply_explicit_reconciliation_alias(_normalize_srms_org(org), "srms")
-        if not candidate.get("code") or not candidate.get("name"):
+        candidate = _normalize_srms_org(org)
+        if not candidate.get("tenant_id") or not candidate.get("code") or not candidate.get("name"):
             skipped += 1
             continue
         try:
-            result = import_tenant_if_missing(candidate)
-            if result.get("inserted"):
-                inserted += 1
-            else:
-                skipped += 1
+            explicit = bool(_as_str(candidate.get("canonical_tenant_id")))
+            automation_store.upsert_native_tenant_inventory(
+                module_name="srms", native_tenant_id=_as_str(candidate.get("tenant_id")),
+                reported_canonical_tenant_id=_as_str(candidate.get("canonical_tenant_id")) or None,
+                display_name=_as_str(candidate.get("name")), normalized_name=_normalized_label(candidate.get("name")),
+                routing_key=_as_str(candidate.get("srms_slug")) or None,
+                source_version=_as_str(org.get("identity_version") or org.get("version")) or None,
+                source_updated_at=_as_str(org.get("updated_at")) or None, metadata=org,
+                inventory_status="claimed" if explicit else "unclaimed",
+            )
+            if explicit:
+                _record_explicit_projection("srms", candidate, org)
+            inserted += 1
         except Exception as exc:
             errors.append(
                 {
@@ -127,6 +172,7 @@ def _normalize_eappraisal_tenant(row: Dict[str, Any]) -> Dict[str, Any]:
     is_active = status.lower() != "inactive" if status else True
     return {
         "tenant_id": tenant_id,
+        "canonical_tenant_id": _as_str(row.get("canonical_tenant_id")) or None,
         "code": code,
         "name": name,
         "eappraisal_subdomain": subdomain or None,
@@ -162,16 +208,24 @@ def import_missing_tenants_from_eappraisal(
 
     for row in tenants:
         scanned += 1
-        candidate = _apply_explicit_reconciliation_alias(_normalize_eappraisal_tenant(row), "eappraisal")
-        if not candidate.get("code") or not candidate.get("name"):
+        candidate = _normalize_eappraisal_tenant(row)
+        if not candidate.get("tenant_id") or not candidate.get("code") or not candidate.get("name"):
             skipped += 1
             continue
         try:
-            result = import_tenant_if_missing(candidate)
-            if result.get("inserted"):
-                inserted += 1
-            else:
-                skipped += 1
+            explicit = bool(_as_str(candidate.get("canonical_tenant_id")))
+            automation_store.upsert_native_tenant_inventory(
+                module_name="eappraisal", native_tenant_id=_as_str(candidate.get("tenant_id")),
+                reported_canonical_tenant_id=_as_str(candidate.get("canonical_tenant_id")) or None,
+                display_name=_as_str(candidate.get("name")), normalized_name=_normalized_label(candidate.get("name")),
+                routing_key=_as_str(candidate.get("eappraisal_subdomain")) or None,
+                source_version=_as_str(row.get("identity_version") or row.get("version")) or None,
+                source_updated_at=_as_str(row.get("updated_at")) or None, metadata=row,
+                inventory_status="claimed" if explicit else "unclaimed",
+            )
+            if explicit:
+                _record_explicit_projection("eappraisal", candidate, row)
+            inserted += 1
         except Exception as exc:
             errors.append(
                 {

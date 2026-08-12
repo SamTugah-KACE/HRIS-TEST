@@ -214,6 +214,8 @@ def get_dashboard_summary(
 
     role = user.effective_role
     superadmin = None
+    appraisal_launchable = mapping.module_enabled("eappraisal") and bool(str(mapping.eappraisal_subdomain or "").strip())
+    leave_launchable = mapping.module_enabled("eleave") and bool(str(mapping.eleave_subdomain or "").strip())
 
     quick_actions = []
     if role in ("hris:super_admin", "hris:tenant_admin", "hris:hr_manager"):
@@ -223,16 +225,26 @@ def get_dashboard_summary(
             {"id": "view_reports", "label": "View Reports", "icon": "bar-chart-2", "href": "/reports"},
         ])
     if role in ("hris:super_admin", "hris:tenant_admin", "hris:hr_manager", "hris:line_manager"):
-        quick_actions.extend([
-            {"id": "pending_leaves", "label": "Pending Leave Approvals", "icon": "calendar-clock", "href": "/modules/leave"},
-            {"id": "pending_appraisals", "label": "Pending Appraisals", "icon": "clipboard-check", "href": "/modules/appraisal"},
-        ])
+        if leave_launchable:
+            quick_actions.append(
+                {"id": "pending_leaves", "label": "Pending Leave Approvals", "icon": "calendar-clock", "href": "/modules/leave"}
+            )
+        if appraisal_launchable:
+            quick_actions.append(
+                {"id": "pending_appraisals", "label": "Pending Appraisals", "icon": "clipboard-check", "href": "/modules/appraisal"}
+            )
     if role == "hris:employee":
-        quick_actions.extend([
-            {"id": "apply_leave", "label": "Apply for Leave", "icon": "calendar-plus", "href": "/modules/leave"},
-            {"id": "my_appraisal", "label": "My Appraisal", "icon": "clipboard-list", "href": "/modules/appraisal"},
-            {"id": "my_profile", "label": "My Profile", "icon": "user", "href": "/profile"},
-        ])
+        if leave_launchable:
+            quick_actions.append(
+                {"id": "apply_leave", "label": "Apply for Leave", "icon": "calendar-plus", "href": "/modules/leave"}
+            )
+        if appraisal_launchable:
+            quick_actions.append(
+                {"id": "my_appraisal", "label": "My Appraisal", "icon": "clipboard-list", "href": "/modules/appraisal"}
+            )
+        quick_actions.append(
+            {"id": "my_profile", "label": "My Profile", "icon": "user", "href": "/profile"}
+        )
 
     return {
         "user": {

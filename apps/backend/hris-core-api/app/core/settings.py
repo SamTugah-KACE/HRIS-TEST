@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     keycloak_internal_base_url: Optional[str] = Field(None, alias="KEYCLOAK_INTERNAL_BASE_URL")
     keycloak_jwks_url: Optional[str] = Field(None, alias="KEYCLOAK_JWKS_URL")
     keycloak_audience: Optional[str] = Field(None, alias="KEYCLOAK_AUDIENCE_HRIS_CORE")
+    canonical_membership_enforcement: bool = Field(
+        False, alias="CANONICAL_MEMBERSHIP_ENFORCEMENT"
+    )
+    verified_projection_enforcement: bool = Field(
+        False, alias="VERIFIED_PROJECTION_ENFORCEMENT"
+    )
     keycloak_token_url: Optional[str] = Field(None, alias="KEYCLOAK_TOKEN_URL")
     keycloak_authorize_url: Optional[str] = Field(None, alias="KEYCLOAK_AUTHORIZE_URL")
     keycloak_end_session_url: Optional[str] = Field(None, alias="KEYCLOAK_END_SESSION_URL")
@@ -98,6 +104,9 @@ class Settings(BaseSettings):
     )
     eappraisal_hris_service_token: Optional[str] = Field(
         None, alias="EAPPRAISAL_HRIS_SERVICE_TOKEN"
+    )
+    eappraisal_tenant_id_mode: str = Field(
+        "resolve_native", alias="EAPPRAISAL_TENANT_ID_MODE"
     )
 
     eleave_domain_template: Optional[str] = Field(

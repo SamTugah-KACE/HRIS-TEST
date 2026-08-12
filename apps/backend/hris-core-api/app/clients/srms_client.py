@@ -101,6 +101,14 @@ def list_integration_tenants(token: Optional[str]) -> Dict[str, Any]:
     return adapter.list_organizations(token)
 
 
+def provision_tenant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _require_srms_config()
+    adapter = get_srms_adapter()
+    if not hasattr(adapter, "provision_tenant"):
+        raise RuntimeError("Configured SRMS adapter does not support tenant provisioning")
+    return adapter.provision_tenant(payload)  # type: ignore[attr-defined]
+
+
 def list_tenant_users(
     tenant_id: str,
     token: Optional[str],

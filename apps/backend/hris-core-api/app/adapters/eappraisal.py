@@ -89,8 +89,9 @@ class HttpEappraisalAdapter(EappraisalAdapter):
 
     def _resolve_integration_tenant_id(self, mapping: TenantMapping, token: Optional[str]) -> str:
         """
-        Resolve module-native tenant id for inventory/users routes.
-        Falls back to code/name/subdomain matching when UUIDs differ across systems.
+        Resolve the module-native tenant id using immutable identity or an
+        explicitly stored routing key. Names and display codes are never tenant
+        identity evidence and must not participate in federation matching.
         """
         payload = self.list_integration_tenants(token, limit=2000)
         tenants = payload.get("tenants", []) if isinstance(payload, dict) else []
@@ -102,34 +103,39 @@ class HttpEappraisalAdapter(EappraisalAdapter):
             )
 
         want_id = self._norm_match(mapping.tenant_id)
-        want_code = self._norm_match(mapping.code)
-        want_name = self._norm_match(mapping.name)
         want_sub = self._norm_match(mapping.eappraisal_subdomain)
 
         def _score(row: Dict[str, Any]) -> int:
             row_id = self._norm_match(row.get("tenant_id") or row.get("id"))
-            row_code = self._norm_match(row.get("code"))
-            row_name = self._norm_match(row.get("name"))
             row_sub = self._norm_match(row.get("subdomain") or row.get("tenant_slug") or row.get("slug"))
             score = 0
             if want_id and row_id == want_id:
                 score += 100
             if want_sub and row_sub == want_sub:
                 score += 80
-            if want_code and row_code == want_code:
-                score += 60
-            if want_name and row_name == want_name:
-                score += 40
-            if want_name and row_name and want_name in row_name:
-                score += 10
             return score
 
-        ranked = sorted(tenants, key=_score, reverse=True)
-        best = ranked[0]
-        if _score(best) <= 0:
+        scored = [(row, _score(row)) for row in tenants]
+        highest_score = max(score for _, score in scored)
+        if highest_score <= 0:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"eAppraisal integration tenant could not be resolved for '{mapping.code}'",
+            )
+        best_matches = [row for row, score in scored if score == highest_score]
+        if len(best_matches) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "eAppraisal integration tenant resolution is ambiguous for "
+                    f"'{mapping.code}' ({len(best_matches)} equally ranked matches)"
+                ),
+            )
+        best = best_matches[0]
+        if best.get("is_active") is False or to_str(best.get("status")).strip().lower() == "inactive":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"eAppraisal integration tenant is inactive for '{mapping.code}'",
             )
         resolved = to_str(best.get("tenant_id") or best.get("id"))
         if not resolved:
@@ -138,6 +144,47 @@ class HttpEappraisalAdapter(EappraisalAdapter):
                 detail="eAppraisal integration tenant payload missing tenant_id",
             )
         return resolved
+
+    def _build_contract_headers(
+        self,
+        mapping: TenantMapping,
+        token: Optional[str],
+        base_url: str,
+        *,
+        employee_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Build headers compatible with both the canonical and deployed v1 contracts.
+
+        The deployed eAppraisal v1 routes interpret ``X-HRIS-Tenant-Id`` as their
+        native organization UUID. HRIS owns a different global UUID, so sending it
+        causes the upstream route to reject an otherwise valid subdomain. Resolve the
+        module-native UUID through its inventory by default. If the deployed inventory
+        is temporarily unavailable, omit the UUID and let the same route use the
+        trusted tenant-registry subdomain instead.
+        """
+        headers = self._build_headers(mapping, token, base_url, employee_id=employee_id)
+        mode = str(self.settings.eappraisal_tenant_id_mode or "resolve_native").strip().lower()
+        if mode == "global":
+            return headers
+        if mode == "subdomain":
+            headers.pop("X-HRIS-Tenant-Id", None)
+            return headers
+        if mode != "resolve_native":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Unsupported EAPPRAISAL_TENANT_ID_MODE '{mode}'",
+            )
+        try:
+            headers["X-HRIS-Tenant-Id"] = self._resolve_integration_tenant_id(mapping, token)
+        except HTTPException as exc:
+            # Deployed v1 explicitly supports subdomain-only tenant resolution. The
+            # subdomain comes from the authenticated HRIS tenant registry mapping.
+            # Only availability failures may use this compatibility path; identity,
+            # ambiguity, and inactive-tenant failures must remain fail-closed.
+            if exc.status_code < 500:
+                raise
+            headers.pop("X-HRIS-Tenant-Id", None)
+        return headers
 
     def _candidate_paths(self, hris_path: str, module_path: str) -> List[str]:
         mode = self.settings.module_adapter_mode.lower()
@@ -158,6 +205,24 @@ class HttpEappraisalAdapter(EappraisalAdapter):
             )
         return self.settings.eappraisal_domain_template.format(subdomain=mapping.eappraisal_subdomain)
 
+    def provision_tenant(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or retrieve one Appraisal tenant projection idempotently."""
+        base_url = self._build_integration_base_url().rstrip("/")
+        url = f"{base_url}/api/hris/v1/integration/tenants"
+        last_response: Optional[httpx.Response] = None
+        with self._get_http_client() as client:
+            for headers in self._integration_header_candidates(None):
+                response = client.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload)
+                last_response = response
+                if response.status_code in {401, 403}:
+                    continue
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"eAppraisal tenant provisioning failed ({response.status_code}): {response.text[:500]}")
+                body = response.json()
+                return body if isinstance(body, dict) else {}
+        status_code = last_response.status_code if last_response is not None else 502
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"eAppraisal tenant provisioning authentication failed ({status_code})")
+
     def _build_headers(
         self,
         mapping: TenantMapping,
@@ -168,6 +233,12 @@ class HttpEappraisalAdapter(EappraisalAdapter):
     ) -> Dict[str, str]:
         active_token = token or self._runtime_access_token or self.settings.eappraisal_service_token
         headers = build_auth_headers(active_token, None)
+        shared_secret = str(getattr(self.settings, "eappraisal_hris_shared_secret", "") or "").strip()
+        service_token = str(getattr(self.settings, "eappraisal_hris_service_token", "") or "").strip()
+        if shared_secret:
+            headers["X-HRIS-Shared-Secret"] = shared_secret
+        if service_token:
+            headers["X-HRIS-Service-Token"] = service_token
         headers.update(
             build_hris_metadata_headers(
                 module_name="eappraisal",
@@ -403,7 +474,7 @@ class HttpEappraisalAdapter(EappraisalAdapter):
 
     def get_appraisal_summary(self, mapping: TenantMapping, token: Optional[str]) -> Dict[str, Any]:
         base_url = self._build_base_url(mapping)
-        headers = self._build_headers(mapping, token, base_url)
+        headers = self._build_contract_headers(mapping, token, base_url)
         paths = self._candidate_paths(
             hris_path="/api/hris/appraisals/summary",
             module_path="/api/dashboard/counts",
@@ -446,7 +517,7 @@ class HttpEappraisalAdapter(EappraisalAdapter):
 
     def get_employee_appraisals(self, mapping: TenantMapping, employee_id: str, token: Optional[str]) -> Dict[str, Any]:
         base_url = self._build_base_url(mapping)
-        headers = self._build_headers(mapping, token, base_url, employee_id=employee_id)
+        headers = self._build_contract_headers(mapping, token, base_url, employee_id=employee_id)
         mode = self.settings.module_adapter_mode.lower()
 
         with self._get_http_client() as client:

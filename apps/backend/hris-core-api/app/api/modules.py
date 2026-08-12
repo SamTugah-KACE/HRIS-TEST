@@ -700,6 +700,11 @@ def get_module_catalog(
                 "capabilities": {
                     "manager_view": manager_view,
                     "self_service_view": True,
+                    # Only modules with a real, dedicated native profile view
+                    # belong in the unified profile hub.  A dashboard or an
+                    # appraisal list is not a profile substitute.
+                    "profile_view": normalized_module_id == "srms",
+                    "profile_path": "/hris/profile" if normalized_module_id == "srms" else None,
                     "read_mode": "native-readonly",
                     "readiness": readiness,
                 },
@@ -744,10 +749,16 @@ def issue_module_handoff(
     native_app_url = str(launch.get("native_app_url") or "").strip()
     if not native_app_url:
         raise HTTPException(status_code=409, detail=f"Native launch URL is missing for module '{normalized_module_id}'")
+    tenant_routing_key = (
+        mapping.srms_slug if normalized_module_id == "srms"
+        else mapping.eappraisal_subdomain if normalized_module_id == "eappraisal"
+        else mapping.eleave_subdomain
+    )
     issued = issue_handoff_launch(
         user=user,
         module_id=normalized_module_id,
         tenant_id=mapping.tenant_id,
+        tenant_routing_key=str(tenant_routing_key or ""),
         native_app_url=native_app_url,
         settings=settings,
     )
@@ -764,6 +775,7 @@ def issue_module_handoff(
     return {
         "module_id": normalized_module_id,
         "tenant_id": mapping.tenant_id,
+        "tenant_slug": tenant_routing_key,
         "launch_url": issued.get("launch_url"),
         "expires_at": issued.get("expires_at"),
         "target_route": issued.get("target_route"),

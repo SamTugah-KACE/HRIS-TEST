@@ -41,7 +41,10 @@ def _derive_native_app_url(module_id: str, mapping: TenantMapping, settings: Set
     Compute the browser entry URL for the module's own SPA, if configuration allows.
 
     SRMS: {SRMS_BASE_URL}/{slug}/dashboard (path-based tenancy in replica docs).
-    eAppraisal / eLeave: domain templates with {subdomain} placeholder.
+    eAppraisal: either a shared static SPA origin or a tenant-aware
+    ``{subdomain}`` template. Tenant identity is still carried separately in
+    the signed handoff payload and response.
+    eLeave: domain template with {subdomain} placeholder.
     """
     normalized = str(module_id or "").strip().lower()
     if normalized == "srms":
@@ -54,9 +57,16 @@ def _derive_native_app_url(module_id: str, mapping: TenantMapping, settings: Set
     if normalized == "eappraisal":
         template = str(settings.eappraisal_domain_template or "").strip()
         sub = _segment_or_none(mapping.eappraisal_subdomain)
-        if not template or "{subdomain}" not in template or not sub:
+        # A mapped native tenant is required in both deployment topologies:
+        # - current shared origin: https://appraisal.example.com
+        # - future per-tenant origin: https://{subdomain}.appraisal.example.com
+        # The handoff endpoint returns `sub` separately for the Appraisal SSO
+        # bridge, so accepting a static origin does not discard tenant context.
+        if not template or not sub:
             return None
-        return template.format(subdomain=sub).rstrip("/")
+        if "{subdomain}" in template:
+            return template.format(subdomain=sub).rstrip("/")
+        return template.rstrip("/")
 
     if normalized == "eleave":
         template = str(settings.eleave_domain_template or "").strip()

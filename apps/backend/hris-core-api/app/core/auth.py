@@ -58,23 +58,36 @@ def _resolve_tenant_id_with_conflict_guard(
     tenant_id = str(token_tenant_id or "").strip() or None
     default_tenant_id = str(settings.dev_default_tenant_id or "").strip() or None
 
-    resolved = automation_store.resolve_identity_link(
-        module_name="srms",
-        keycloak_sub=str(payload.get("sub") or "").strip() or None,
-        email=str(email or "").strip().lower() or None,
-        username=str(preferred_username or "").strip().lower() or None,
-        preferred_tenant_id=preferred_tenant_hint,
-        avoid_tenant_id=default_tenant_id,
+    issuer = str(payload.get("iss") or "").rstrip("/")
+    subject = str(payload.get("sub") or "").strip()
+    resolved = automation_store.resolve_principal_tenant(
+        keycloak_issuer=issuer,
+        keycloak_sub=subject,
+        preferred_tenant_id=tenant_id or preferred_tenant_hint,
     )
+    # Controlled legacy bridge while membership rows are being backfilled.
+    # All modules participate and only the exact signed issuer+subject is used.
     if not resolved:
-        resolved = automation_store.resolve_identity_link(
-            module_name="keycloak",
-            keycloak_sub=str(payload.get("sub") or "").strip() or None,
-            email=str(email or "").strip().lower() or None,
-            username=str(preferred_username or "").strip().lower() or None,
-            preferred_tenant_id=preferred_tenant_hint,
-            avoid_tenant_id=default_tenant_id,
-        )
+        candidates = []
+        for module_name in ("keycloak", "srms", "eappraisal", "eleave"):
+            linked = automation_store.resolve_identity_link(
+                module_name=module_name,
+                keycloak_issuer=issuer or None,
+                keycloak_sub=subject or None,
+                email=None,
+                username=None,
+                preferred_tenant_id=tenant_id or preferred_tenant_hint,
+                avoid_tenant_id=default_tenant_id,
+            )
+            if linked:
+                candidates.append(linked)
+        candidate_tenants = {str(row.get("tenant_id") or "").strip() for row in candidates}
+        candidate_tenants.discard("")
+        preferred = str(tenant_id or preferred_tenant_hint or "").strip()
+        if preferred and preferred in candidate_tenants:
+            resolved = next(row for row in candidates if str(row.get("tenant_id") or "").strip() == preferred)
+        elif len(candidate_tenants) == 1:
+            resolved = candidates[0]
     if isinstance(resolved, dict):
         resolved_link = resolved
 
@@ -355,22 +368,39 @@ async def _get_user_keycloak(
             detail="Token missing required claims (tenant_id or username)",
         )
 
+    # Rollout gate: enable after the membership backfill has completed.  Once
+    # enabled, a valid Keycloak token alone cannot manufacture tenant access;
+    # the exact issuer+subject must hold an active canonical membership.
+    if get_settings().canonical_membership_enforcement and not is_platform_superadmin:
+        membership = automation_store.get_tenant_membership(
+            keycloak_issuer=str(payload.get("iss") or "").rstrip("/"),
+            keycloak_sub=str(payload.get("sub") or "").strip(),
+            canonical_tenant_id=str(tenant_id),
+        )
+        if not membership or str(membership.get("status") or "").lower() != "active":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authenticated principal has no active membership in this canonical tenant",
+            )
+
     # Reconcile SRMS employee identity from persisted identity mappings to avoid
     # stale token employee_id drift after user migrations or upstream rekeys.
     resolved_srms_identity = automation_store.resolve_identity_mapping(
         tenant_id=str(tenant_id),
         module_name="srms",
+        keycloak_issuer=str(payload.get("iss") or "").rstrip("/") or None,
         keycloak_sub=str(payload.get("sub") or "").strip() or None,
-        email=str(email or "").strip().lower() or None,
-        username=str(preferred_username or "").strip().lower() or None,
+        email=None,
+        username=None,
     )
     if not isinstance(resolved_srms_identity, dict):
         resolved_srms_identity = automation_store.resolve_identity_mapping(
             tenant_id=str(tenant_id),
             module_name="keycloak",
+            keycloak_issuer=str(payload.get("iss") or "").rstrip("/") or None,
             keycloak_sub=str(payload.get("sub") or "").strip() or None,
-            email=str(email or "").strip().lower() or None,
-            username=str(preferred_username or "").strip().lower() or None,
+            email=None,
+            username=None,
         )
     if isinstance(resolved_srms_identity, dict):
         resolved_srms_tenant = str(resolved_srms_identity.get("tenant_id") or "").strip() or None

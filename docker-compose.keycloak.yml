@@ -37,6 +37,8 @@ services:
       EAPPRAISAL_HRIS_SHARED_SECRET: ${HRIS_EAPPRAISAL_HRIS_SHARED_SECRET:-}
       # Purpose: Secret/configuration for eappraisal hris service token; inject securely and never commit a real value.
       EAPPRAISAL_HRIS_SERVICE_TOKEN: ${HRIS_EAPPRAISAL_HRIS_SERVICE_TOKEN:-}
+      # Purpose: Resolve the HRIS global tenant to the deployed eAppraisal native organization UUID.
+      EAPPRAISAL_TENANT_ID_MODE: ${HRIS_EAPPRAISAL_TENANT_ID_MODE:-resolve_native}
       # Purpose: Configures eleave domain template.
       ELEAVE_DOMAIN_TEMPLATE: ${HRIS_ELEAVE_DOMAIN_TEMPLATE:-}
       # Purpose: Secret/configuration for eleave service token; inject securely and never commit a real value.

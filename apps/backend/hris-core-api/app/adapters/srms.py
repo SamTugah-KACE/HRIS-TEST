@@ -528,6 +528,15 @@ class HttpSrmsAdapter(SrmsAdapter):
             status_raw = "active" if is_active is not False else "inactive"
         return {
             "tenant_id": to_str(raw.get("tenant_id") or raw.get("organization_id") or raw.get("id")),
+            # Preserve the native module's explicit federation identity and
+            # routing metadata.  Dropping these fields made an otherwise valid
+            # SRMS tenant look unprojected when the catalog evaluated it.
+            "canonical_tenant_id": to_str(
+                raw.get("canonical_tenant_id") or raw.get("hris_canonical_tenant_id")
+            ).strip() or None,
+            "srms_schema": to_str(
+                raw.get("srms_schema") or raw.get("schema_name") or raw.get("schema")
+            ).strip() or None,
             "name": to_str(raw.get("name") or raw.get("organization_name") or code),
             "code": code,
             "slug": to_str(raw.get("tenant_slug") or raw.get("slug")),
@@ -1234,6 +1243,50 @@ class HttpSrmsAdapter(SrmsAdapter):
                 "inactive": inactive,
             },
         }
+
+    def provision_tenant(self, payload_body: Dict[str, Any]) -> Dict[str, Any]:
+        """Create or retrieve an SRMS tenant projection by canonical UUID."""
+        if not self.settings.srms_base_url:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SRMS base URL is not configured")
+        paths = ["/api/hris/v1/integration/tenants"]
+        response_payload: Any = None
+        last_exception: Optional[HTTPException] = None
+        with self._get_http_client() as client:
+            session_token = self._session_token_from_config_or_cache() or self._refresh_runtime_session_token(client)
+            for headers in self._integration_header_candidates(None):
+                headers["Content-Type"] = "application/json"
+                if session_token:
+                    headers["X-Session-Token"] = session_token
+                try:
+                    response_payload, _ = get_json_from_candidate_paths(
+                        client=client,
+                        base_url=str(self.settings.srms_base_url),
+                        paths=paths,
+                        headers=headers,
+                        method="POST",
+                        json_body=payload_body,
+                        module_name="SRMS",
+                        payload_security_mode=self.settings.srms_payload_security_mode,
+                        payload_signing_secret=self.settings.srms_payload_signing_secret,
+                        payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                        payload_session_token=session_token,
+                        prepare_headers=lambda path, base_headers: self._build_signed_headers_for_path(
+                            path=path,
+                            session_token=session_token,
+                            method="POST",
+                            base_headers=base_headers,
+                        ),
+                    )
+                    break
+                except HTTPException as exc:
+                    last_exception = exc
+        if response_payload is None:
+            if last_exception is not None:
+                raise last_exception
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="SRMS tenant provisioning returned no payload")
+        envelope = ensure_dict(response_payload)
+        data = ensure_dict(envelope.get("data")) or envelope
+        return data
 
     def list_tenant_users(
         self,

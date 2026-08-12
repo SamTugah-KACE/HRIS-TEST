@@ -30,6 +30,7 @@ export type ModuleCatalogLaunch = {
 export type ModuleHandoffLaunchResponse = {
   module_id: string;
   tenant_id: string;
+  tenant_slug?: string;
   launch_url: string;
   expires_at: number;
   target_route?: string;
@@ -55,6 +56,8 @@ export type ModuleCatalogItem = {
   capabilities?: {
     manager_view?: boolean;
     self_service_view?: boolean;
+    profile_view?: boolean;
+    profile_path?: string | null;
     read_mode?: string;
     [key: string]: unknown;
   };
@@ -659,6 +662,57 @@ export const listTenants = async (limit = 200): Promise<TenantListResponse> => {
   return r.data;
 };
 
+export type NativeTenantInventoryRow = {
+  module_name: string;
+  native_tenant_id: string;
+  reported_canonical_tenant_id?: string | null;
+  display_name: string;
+  routing_key?: string | null;
+  inventory_status: string;
+  source_version?: string | null;
+};
+
+export type TenantLinkClaim = {
+  claim_id: string;
+  canonical_tenant_id: string;
+  module_name: string;
+  native_tenant_id: string;
+  state: string;
+  initiated_by: string;
+  approved_by?: string | null;
+  expires_at?: string | null;
+};
+
+export const listNativeTenantInventory = async (module?: string): Promise<NativeTenantInventoryRow[]> => {
+  const r = await httpClient.get<{ items: NativeTenantInventoryRow[] }>('/federation/native-tenants', {
+    params: { module: module || undefined, limit: 2000 },
+  });
+  return r.data.items || [];
+};
+
+export const createTenantLinkClaim = async (payload: {
+  canonical_tenant_id: string; module_name: string; native_tenant_id: string;
+  reason: string; expected_link_version?: number;
+}): Promise<{ claim: TenantLinkClaim; challenge: string; expires_at: string }> => {
+  const r = await httpClient.post('/federation/claims', payload);
+  return r.data;
+};
+
+export const listTenantLinkClaims = async (): Promise<TenantLinkClaim[]> => {
+  const r = await httpClient.get<{ items: TenantLinkClaim[] }>('/federation/claims', { params: { limit: 500 } });
+  return r.data.items || [];
+};
+
+export const confirmTenantLinkClaim = async (claimId: string, assertion: string): Promise<{ claim: TenantLinkClaim }> => {
+  const r = await httpClient.post(`/federation/claims/${encodeURIComponent(claimId)}/confirm-native`, { assertion });
+  return r.data;
+};
+
+export const approveTenantLinkClaim = async (claimId: string, reason: string): Promise<unknown> => {
+  const r = await httpClient.post(`/federation/claims/${encodeURIComponent(claimId)}/approve`, { reason });
+  return r.data;
+};
+
 export const updateTenantBranding = async (
   tenantId: string,
   payload: { brand_name?: string; support_email?: string; theme?: Record<string, unknown> }
@@ -685,6 +739,7 @@ export const uploadTenantLogo = async (
 export type TenantOnboardingImportResponse = {
   imported: boolean;
   result: unknown;
+  modules?: Record<string, unknown>;
 };
 
 export const importTenantOnboarding = async (
@@ -692,11 +747,17 @@ export const importTenantOnboarding = async (
     tenant_id?: string;
     code: string;
     name: string;
-    srms_schema?: string;
-    srms_slug?: string;
-    eappraisal_subdomain?: string;
-    eleave_subdomain?: string;
     is_active: boolean;
+    enabled_modules?: string[];
+    primary_admin_email?: string;
+    organization_email?: string;
+    country?: string;
+    organization_type?: string;
+    employee_range?: string;
+    contact_person?: string;
+    phone_number?: string;
+    organization_nature?: string;
+    subscription_plan?: string;
   }
 ): Promise<TenantOnboardingImportResponse> => {
   const r = await httpClient.post<TenantOnboardingImportResponse>('/tenants/onboarding/import', payload);

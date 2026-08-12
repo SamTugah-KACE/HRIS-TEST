@@ -402,8 +402,12 @@ export const ProfileHubPage: React.FC = () => {
   useEffect(() => {
     getModulesCatalog()
       .then((resp) => {
+        // Use the catalog's computed readiness result, not only the tenant's
+        // configured status. This keeps unavailable module frames (for example
+        // eLeave before rollout) out of the unified profile while still showing
+        // every module that is genuinely connected for this user and tenant.
         const active = (resp.modules ?? []).filter(
-          (m) => String(m.status ?? '').toLowerCase() === 'active',
+          (m) => m.enabled && m.capabilities?.profile_view === true,
         );
         setCatalog(active);
         // Auto-select first module tab if any are active.
@@ -427,7 +431,7 @@ export const ProfileHubPage: React.FC = () => {
     return {
       moduleId: item.id.toLowerCase(),
       label: cap?.label ?? item.label ?? item.id,
-      profilePath: cap?.profilePath ?? '/hris/profile',
+      profilePath: cap?.profilePath ?? item.capabilities?.profile_path ?? '/hris/profile',
       hasCapability: Boolean(cap),
     };
   });

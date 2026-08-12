@@ -392,10 +392,16 @@ export const DashboardPage: React.FC = () => {
       {/* Employee self-service stats */}
       {!isManager && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <StatCard label="Leave Balance" value={`${annualAvailable} days`} icon={CalendarDays} color="blue" />
-          <StatCard label="Leave Taken" value={`${annualUsed} days`} icon={CalendarCheck} color="green" />
-          <StatCard label="Pending Requests" value={String(annualPending)} icon={CalendarClock} color="amber" />
-          <StatCard label="Appraisal Status" value={`${appraisalProgress}% Complete`} icon={ClipboardCheck} color="purple" />
+          {hasEleave && (
+            <>
+              <StatCard label="Leave Balance" value={`${annualAvailable} days`} icon={CalendarDays} color="blue" />
+              <StatCard label="Leave Taken" value={`${annualUsed} days`} icon={CalendarCheck} color="green" />
+              <StatCard label="Pending Requests" value={String(annualPending)} icon={CalendarClock} color="amber" />
+            </>
+          )}
+          {hasEappraisal && (
+            <StatCard label="Appraisal Status" value={`${appraisalProgress}% Complete`} icon={ClipboardCheck} color="purple" />
+          )}
         </div>
       )}
 
@@ -528,29 +534,31 @@ export const DashboardPage: React.FC = () => {
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <div className="card">
-            <h3 className="mb-4 text-sm font-semibold text-gray-900">Leave Distribution</h3>
-            <div className="flex items-center justify-center">
-              <ResponsiveContainer width="100%" height={250}>
-                <PieChart>
-                  <Pie
-                    data={leaveChartData}
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={90}
-                    innerRadius={50}
-                    dataKey="value"
-                    label={({ name, percent }) => `${name} ${(((percent ?? 0) * 100)).toFixed(0)}%`}
-                  >
-                    {leaveChartData.map((entry, i) => (
-                      <Cell key={entry.name} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+          {hasEleave && (
+            <div className="card">
+              <h3 className="mb-4 text-sm font-semibold text-gray-900">Leave Distribution</h3>
+              <div className="flex items-center justify-center">
+                <ResponsiveContainer width="100%" height={250}>
+                  <PieChart>
+                    <Pie
+                      data={leaveChartData}
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={90}
+                      innerRadius={50}
+                      dataKey="value"
+                      label={({ name, percent }) => `${name} ${(((percent ?? 0) * 100)).toFixed(0)}%`}
+                    >
+                      {leaveChartData.map((entry, i) => (
+                        <Cell key={entry.name} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -574,13 +582,13 @@ export const DashboardPage: React.FC = () => {
             <h3 className="mb-4 text-sm font-semibold text-gray-900">Recent Activity</h3>
             <div className="space-y-3">
               {(recentItems.length > 0 ? recentItems : [
-                { action: 'Leave request submitted', detail: 'Annual Leave - 3 days', time: '2 hours ago' },
-                { action: 'Appraisal section completed', detail: 'Key Competencies', time: '1 day ago' },
-                { action: 'Leave approved', detail: 'Sick Leave - Dec 15', time: '2 weeks ago' },
+                { action: 'No recent activity', detail: 'Activity from connected modules will appear here', time: '' },
               ]).map((item, i) => (
                 <div key={i} className="rounded-lg border border-gray-100 p-3">
                   <p className="text-sm font-medium text-gray-900">{item.action}</p>
-                  <p className="text-xs text-gray-500">{item.detail} &middot; {item.time}</p>
+                  <p className="text-xs text-gray-500">
+                    {item.detail}{item.time ? <> &middot; {item.time}</> : null}
+                  </p>
                 </div>
               ))}
             </div>

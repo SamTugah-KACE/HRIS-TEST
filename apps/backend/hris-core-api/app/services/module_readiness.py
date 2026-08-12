@@ -36,14 +36,38 @@ def check_module_readiness(
     if not mapping.module_enabled(module):
         return _result(False, "module_inactive", f"Module '{module}' is not active for tenant '{mapping.code}'")
 
+    if settings.verified_projection_enforcement and module in {"srms", "eappraisal", "eleave"}:
+        projection = automation_store.get_module_projection(
+            canonical_tenant_id=str(mapping.tenant_id), module_name=module
+        )
+        if not projection or str(projection.get("state") or "").lower() != "verified":
+            return _result(
+                False,
+                "unverified_tenant_projection",
+                f"Module '{module}' has no verified native tenant link",
+            )
+
     if module == "srms":
         if not str(settings.srms_base_url or "").strip():
             return _result(False, "missing_srms_base_url", "SRMS base URL is not configured")
+        # The native browser/API boundary is routed by the opaque tenant slug.
+        # ``srms_schema`` is an SRMS-internal persistence detail and must not be
+        # required merely to expose a verified module workspace.  Older
+        # imported tenants may legitimately have a slug before their optional
+        # diagnostic schema metadata has been backfilled.
+        if not str(mapping.srms_slug or "").strip():
+            return _result(
+                False,
+                "missing_srms_tenant_projection",
+                "Staff Records tenant routing key is not configured",
+            )
         return _result(True, "ok", "ready")
 
     if module == "eappraisal":
         if not str(settings.eappraisal_integration_base_url or "").strip():
             return _result(False, "missing_eappraisal_base_url", "EAPPRAISAL_INTEGRATION_BASE_URL is not configured")
+        if not str(mapping.eappraisal_subdomain or "").strip():
+            return _result(False, "missing_eappraisal_tenant_projection", "eAppraisal tenant projection is not configured")
         try:
             payload = eappraisal_client.list_integration_tenant_users(mapping, user.raw_token, limit=2000)
             users = payload.get("users", []) if isinstance(payload, dict) else []
@@ -65,10 +89,33 @@ def check_module_readiness(
                 for row in users
             )
             if not found:
-                return _result(False, "user_not_in_module_inventory", "User not found in eAppraisal tenant users inventory")
-            return _result(True, "ok", "ready")
+                # Tenant readiness and user readiness are intentionally separate.
+                # The Appraisal SSO bridge initializes a missing native user on
+                # first launch; hiding the module here would prevent that JIT
+                # operation from ever running.
+                return _result(
+                    True,
+                    "needs_user_jit",
+                    "eAppraisal tenant is ready; user will be initialized during handoff",
+                    {"user_state": "needs_jit"},
+                )
+            return _result(True, "ok", "ready", {"user_state": "present"})
         except Exception as exc:
-            return _result(False, "eappraisal_inventory_check_failed", str(exc))
+            # Inventory is an observability/JIT hint, not the trust boundary for
+            # launching a tenant that already has an explicit routing projection.
+            # The signed handoff/bridge remains responsible for authenticating
+            # the user and creating or resolving the native account.  Treat a
+            # transient inventory outage as degraded readiness so it cannot hide
+            # Appraisal from exactly the users who need the bridge to recover.
+            return _result(
+                True,
+                "inventory_check_degraded",
+                "eAppraisal tenant is ready; user inventory could not be checked and will be resolved during handoff",
+                {
+                    "user_state": "unknown",
+                    "inventory_error": str(exc),
+                },
+            )
 
     if module == "eleave":
         if not str(settings.eleave_domain_template or "").strip():

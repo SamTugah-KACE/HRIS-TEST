@@ -12,8 +12,9 @@ class Tenant(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), unique=True, nullable=False)  # global tenant id
+    # Codes are unique within HRIS, but are never used to infer identity across modules.
     code = Column(String(64), unique=True, nullable=False)
-    name = Column(String(255), nullable=False)
+    name = Column(String(255), unique=True, nullable=False)
 
     # SRMS mapping
     srms_schema = Column(String(255), nullable=True)

@@ -45,7 +45,7 @@ export function useModuleToken(moduleId: string): UseModuleTokenReturn {
 
       // Path format: /{tenant_slug}/dashboard — first segment is the tenant slug
       const pathParts = url.pathname.split('/').filter(Boolean);
-      const tenantSlug = pathParts[0] ?? '';
+      const tenantSlug = String(handoff.tenant_slug || pathParts[0] || '');
       const moduleOrigin = url.origin;
 
       return {

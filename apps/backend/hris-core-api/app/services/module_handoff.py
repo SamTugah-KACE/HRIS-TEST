@@ -109,6 +109,7 @@ def issue_handoff_token(
     module_id: str,
     tenant_id: str,
     target_route: str,
+    tenant_routing_key: str = "",
     settings: Optional[Settings] = None,
 ) -> HandoffIssueResult:
     cfg = settings or get_settings()
@@ -120,9 +121,17 @@ def issue_handoff_token(
         "sub": str(user.sub),
         "aud": str(module_id),
         "tenant_id": str(tenant_id),
+        "tenant_routing_key": str(tenant_routing_key or "").strip().lower(),
         "username": str(user.username or ""),
         "email": str(user.email or ""),
         "employee_id": str(user.employee_id or ""),
+        "first_name": str((user.token_claims or {}).get("given_name") or ""),
+        "last_name": str((user.token_claims or {}).get("family_name") or ""),
+        # These are Keycloak-derived HRIS roles. The native module uses them only
+        # to initialize a missing account; its own effective permissions remain
+        # authoritative for selecting and protecting native UI functionality.
+        "roles": list(user.roles or []),
+        "effective_role": str(user.effective_role or ""),
         "target_route": _normalize_target_route(target_route, module_id),
         "iat": now_epoch,
         "exp": expires_at,
@@ -151,6 +160,7 @@ def issue_handoff_launch(
     user: AuthenticatedUser,
     module_id: str,
     tenant_id: str,
+    tenant_routing_key: str,
     native_app_url: str,
     settings: Optional[Settings] = None,
 ) -> Dict[str, Any]:
@@ -159,6 +169,7 @@ def issue_handoff_launch(
         user=user,
         module_id=module_id,
         tenant_id=tenant_id,
+        tenant_routing_key=tenant_routing_key,
         target_route=route,
         settings=settings,
     )
@@ -212,7 +223,12 @@ def redeem_handoff_token(
         "username": str(payload.get("username") or ""),
         "email": str(payload.get("email") or ""),
         "employee_id": str(payload.get("employee_id") or ""),
+        "first_name": str(payload.get("first_name") or ""),
+        "last_name": str(payload.get("last_name") or ""),
+        "roles": [str(role) for role in (payload.get("roles") or [])],
+        "effective_role": str(payload.get("effective_role") or ""),
         "tenant_id": token_tenant,
+        "tenant_routing_key": str(payload.get("tenant_routing_key") or "").strip().lower(),
         "module_id": expected_module,
         "target_route": route,
         "jti": jti,

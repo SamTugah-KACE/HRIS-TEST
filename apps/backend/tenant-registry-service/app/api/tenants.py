@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -72,12 +73,20 @@ def import_tenant(payload: TenantImportIn, db: Session = Depends(get_db)) -> Ten
             detail="code and name are required",
         )
 
-    # Idempotency key: tenant_id (preferred) or code.
+    # Immutable tenant_id is the only cross-module identity key. Each system
+    # enforces its own label uniqueness, but the same label appearing in two
+    # different modules is not proof that those tenants are the same entity.
     existing = None
     if payload.tenant_id is not None:
         existing = db.query(Tenant).filter(Tenant.tenant_id == payload.tenant_id).first()
-    if existing is None:
-        existing = db.query(Tenant).filter(Tenant.code == incoming_code).first()
+    if existing is None and payload.tenant_id is None:
+        legacy_matches = db.query(Tenant).filter(Tenant.code == incoming_code).limit(2).all()
+        if len(legacy_matches) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Legacy code lookup is ambiguous; resubmit with canonical tenant_id",
+            )
+        existing = legacy_matches[0] if legacy_matches else None
 
     if existing is not None:
         # Idempotent merge: keep canonical identity but fill missing module metadata.
@@ -106,6 +115,16 @@ def import_tenant(payload: TenantImportIn, db: Session = Depends(get_db)) -> Ten
             db.refresh(existing)
         return TenantImportResult(inserted=False, tenant=TenantOut.model_validate(existing))
 
+    duplicate_label = db.query(Tenant).filter(
+        (func.lower(func.trim(Tenant.code)) == incoming_code.casefold())
+        | (func.lower(func.trim(Tenant.name)) == incoming_name.casefold())
+    ).first()
+    if duplicate_label is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Tenant name or code already exists in HRIS",
+        )
+
     now = datetime.utcnow()
     tenant = Tenant(
         tenant_id=payload.tenant_id or uuid4(),
@@ -127,8 +146,9 @@ def import_tenant(payload: TenantImportIn, db: Session = Depends(get_db)) -> Ten
         db.rollback()
         if payload.tenant_id is not None:
             existing = db.query(Tenant).filter(Tenant.tenant_id == payload.tenant_id).first()
-        if existing is None:
-            existing = db.query(Tenant).filter(Tenant.code == incoming_code).first()
+        if existing is None and payload.tenant_id is None:
+            legacy_matches = db.query(Tenant).filter(Tenant.code == incoming_code).limit(2).all()
+            existing = legacy_matches[0] if len(legacy_matches) == 1 else None
         if existing is None:
             raise
         return TenantImportResult(inserted=False, tenant=TenantOut.model_validate(existing))

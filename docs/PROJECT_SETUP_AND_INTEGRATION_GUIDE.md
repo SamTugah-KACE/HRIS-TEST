@@ -1,6 +1,12 @@
 # HRIS Platform Setup, Structure, Integration, and RBAC Guide
 
-Last updated: 2026-08-04
+Last updated: 2026-08-12
+
+Code audit baseline: working tree inspected on 2026-08-12. Statements marked
+**Implemented** are backed by the current source and, where applicable, tests.
+**Partial** means useful code exists but one or more production controls or
+module contracts are missing. **Planned** describes the recommended target and
+must not be treated as a currently available feature.
 
 This is the canonical first-setup and integration guide for the current grouped
 repo layout. The deployable HRIS apps now live under `apps/`; old root-level
@@ -16,6 +22,23 @@ The platform is a multi-tenant HRIS shell that integrates these native systems:
 - HRIS native features: dashboard, profile hub, employee 360, tenant admin,
   branding, storage settings, reports, module catalog, and secure handoff
 
+Plain-language terms used in this guide:
+
+| Term | Simple meaning |
+| --- | --- |
+| Tenant | One organization's protected HR workspace. |
+| Canonical tenant ID | The main HRIS UUID for that workspace. |
+| Native tenant ID | The ID used by SRMS, eAppraisal, or eLeave for the same workspace. |
+| Projection or tenant link | A checked link between the HRIS tenant and a native module tenant. |
+| Principal | One signed-in person, identified by the identity provider's issuer and subject. |
+| Membership | Permission for a principal to use one tenant. |
+| Federation | Trusting an identity provider to sign users in to HRIS. |
+| Provisioning | Creating, updating, disabling, or linking user accounts. |
+| SCIM | A standard format and API for exchanging users and groups. |
+| Idempotent | Safe to retry without creating the same tenant or user twice. |
+| RLS | Database rules that block one tenant from reading another tenant's rows. |
+| Handoff | A short-lived, one-time way to open a native module for a signed-in user. |
+
 ## 1. Runtime Architecture
 
 The normal request path is:
@@ -28,7 +51,7 @@ Browser
   -> SRMS / eAppraisal / eLeave native APIs
 ```
 
-Key rules:
+Simple rules:
 
 - Portal calls Core API. Portal should not call native module APIs directly.
 - Core API validates identity, resolves tenant mapping, calls modules, and
@@ -214,28 +237,6 @@ python scripts/start_local_stack.py --with-gateway --registry-port 8001 --core-p
 - Core API: `http://127.0.0.1:8000/docs`
 - Tenant Registry: `http://127.0.0.1:8001/docs`
 - Gateway: `http://127.0.0.1:8010/graphql`
-
-### 2.4 Debug/Test Mode
-
-The code still has debug headers and portal role switching, but Core API now
-rejects non-Keycloak auth outside test mode. Use this only for isolated tests:
-
-```text
-APP_ENV=test
-AUTH_MODE=dev
-USE_STUB_DATA=false
-```
-
-Debug request headers understood by Core API:
-
-```text
-X-Debug-Roles: hris:hr_manager
-X-Debug-Username: hr.manager
-X-Debug-Employee-Id: e001
-X-Debug-Tenant-Id: 11111111-1111-1111-1111-111111111111
-```
-
-Do not deploy debug auth or stub data.
 
 ## 3. First Setup: Production Mode
 
@@ -484,8 +485,6 @@ task is explicitly owned by the native module team.
 
 | Path | Purpose |
 | --- | --- |
-| `.github/` | GitHub workflow and repository automation configuration. |
-| `.vscode/` | Local/editor workspace settings. Do not rely on this for runtime behavior. |
 | `apps/` | Standardized home for deployable HRIS applications. |
 | `docs/` | Architecture, operations, contracts, tasks, QA, security, and onboarding docs. |
 | `identity/` | Keycloak realm export and backups. |
@@ -696,90 +695,6 @@ task is explicitly owned by the native module team.
 | `scripts/reset_keycloak_realm.py` | Keycloak realm reset helper. |
 | `scripts/test_backend_apis.ps1` | REST/GraphQL backend smoke checks. |
 | `scripts/check_repo_policy.py` | Repository policy and production-readiness checks. |
-
-### 6.11 `modules/Staff-Records-Management-System/`
-
-SRMS is a native, production-sized app included as a module replica/reference.
-It has many historical docs and deployment scripts. Key directories/files:
-
-| Path | Purpose |
-| --- | --- |
-| `.env` | Local SRMS env. Treat as sensitive. |
-| `README.md` | SRMS module guide. |
-| `docker-compose.production.yml` | SRMS production compose. |
-| `docker-compose.secure.yml` | Hardened SRMS compose. |
-| `docker-compose.unified.yml` | Unified SRMS deployment composition. |
-| `Backend/` | SRMS FastAPI backend. |
-| `Backend/main.py` | SRMS FastAPI entrypoint. |
-| `Backend/requirements.txt` | SRMS backend dependencies. |
-| `Backend/Dockerfile` | SRMS backend image. |
-| `Backend/app/apis/` | SRMS API routers. |
-| `Backend/app/apis/hris_integration_api.py` | HRIS-facing `/api/hris/v1/*` endpoints for dashboard, employees, tenant inventory, user inventory, provisioning. |
-| `Backend/app/apis/sso_bridge_api.py` | Exchanges HRIS handoff token for SRMS session. |
-| `Backend/app/dependencies/hris_auth.py` | HRIS auth dependency, shared-secret/service auth, module token support. |
-| `Backend/app/models/` | SRMS public and tenant SQLAlchemy models. |
-| `Backend/app/schemas/` | SRMS request/response schemas. |
-| `Backend/app/services/` | SRMS business services: orgs, employees, security, storage, messaging, etc. |
-| `Backend/database/` | SRMS DB session utilities. |
-| `Backend/alembic/` | SRMS public/tenant migrations. |
-| `Backend/tests/` | SRMS backend tests, including HRIS integration tests. |
-| `frontend/` | SRMS React frontend. |
-| `frontend/src/index.js` | SRMS frontend entry and HRIS bridge hook area. |
-| `frontend/src/context/` | SRMS auth/org/API/WebSocket contexts. |
-| `frontend/src/utils/` | SRMS URL, session, request signing, payload encryption/decryption helpers. |
-| `frontend/Dockerfile` | SRMS frontend image. |
-| `superadmin/` | SRMS superadmin UI/app assets. |
-| `nginx/` | SRMS Nginx config/image support. |
-| `scripts/` | SRMS operational scripts. |
-| `*.md` at SRMS root | Historical implementation, security, deployment, and troubleshooting notes. |
-
-### 6.12 `modules/performance-appraisal/`
-
-eAppraisal is a native Angular + FastAPI module.
-
-| Path | Purpose |
-| --- | --- |
-| `client/` | Angular frontend. |
-| `client/package.json` | Angular dependencies/scripts. |
-| `client/src/app/auth/` | Native authentication UI/services. |
-| `client/src/app/main-app/` | Main tenant application pages: dashboard, staff, appraisal management, roles, reports. |
-| `client/src/app/shared/guards/` | Auth, role, permission, appraisal guards. |
-| `client/src/app/shared/interceptors/` | Token, tenant, loading, and error interceptors. |
-| `client/src/app/store/` | Angular state actions/states. |
-| `backend/app/` | FastAPI backend. |
-| `backend/app/main.py` | eAppraisal FastAPI entrypoint and middleware wiring. |
-| `backend/app/apis/routers.py` | Includes native routers and HRIS integration router. |
-| `backend/app/apis/hris_integration_api.py` | HRIS service-to-service provisioning endpoint. |
-| `backend/app/db/` | SQLAlchemy session, migration, schema initialization. |
-| `backend/app/middleware/tenant.py` | Header-based tenant schema selection. |
-| `backend/app/utils/rbac.py` | Tenant role and permission checks. |
-| `backend/app/domains/` | Domain modules: auth, organization, appraisal, notification, tenancies. |
-
-### 6.13 `modules/eLeave/`
-
-eLeave is a native Angular + Laravel module using Stancl Tenancy.
-
-| Path | Purpose |
-| --- | --- |
-| `backend/` | Laravel backend. |
-| `backend/composer.json` | PHP dependencies. |
-| `backend/artisan` | Laravel CLI entry. |
-| `backend/config/tenancy.php` | Stancl tenancy configuration. |
-| `backend/routes/api.php` | Central API routes and HRIS provisioning route. |
-| `backend/routes/tenant.php` | Tenant path routes under `/{tenant}`. |
-| `backend/app/Http/Controllers/HrisIntegrationController.php` | HRIS service-to-service provisioning endpoint. |
-| `backend/app/Http/Controllers/` | Auth, staff, leave, roles, reports, org controllers. |
-| `backend/app/Models/` | Tenant and central Eloquent models. |
-| `backend/app/Jobs/` | Staff import and leave automation jobs. |
-| `backend/app/Console/Commands/` | Scheduled leave, notification, and tenant commands. |
-| `backend/database/migrations/` | Central migrations. |
-| `backend/database/migrations/tenant/` | Tenant database migrations. |
-| `backend/database/seeders/` | Tenant and RBAC seeders. |
-| `backend/tests/` | Laravel tests. |
-| `frontend/` | Angular frontend. |
-| `frontend/package.json` | Angular dependencies/scripts. |
-| `frontend/src/app/tenant-app/` | Tenant leave-management UI. |
-| `frontend/src/app/tenant-app/utils/permissions.ts` | Native eLeave permission and role constants. |
 
 ## 7. HRIS and SRMS Integration Workflow
 
@@ -1075,10 +990,15 @@ It should return at least:
 | `Director`, `recommendLeaves`, `approveLeaves` | `hris:line_manager` |
 | `Normal`, `applyForLeave`, `viewMyLeaves` | `hris:employee` |
 
-4. Provision or update Keycloak user:
+4. Provision or update the Keycloak user:
 
-- Use deterministic tenant-scoped usernames to avoid cross-tenant collisions:
-  `email__tenantcode`.
+- Identify the person by the immutable `(issuer, subject)` pair and store each
+  tenant relationship as a separate membership. Do not derive identity from an
+  email address or encode tenant identity into a mutable email-based username.
+- If the current realm configuration requires a unique username, generate an
+  opaque, stable login name and keep native usernames/emails as aliases or
+  profile attributes. A user with multiple tenant memberships remains one
+  principal and selects an authorized, signed tenant context.
 - Set `tenant_id` claim.
 - Assign global HRIS roles based on mapped native role/permissions.
 
@@ -1280,27 +1200,527 @@ Integration smoke:
 powershell -ExecutionPolicy Bypass -File .\scripts\test_backend_apis.ps1
 ```
 
-## 13. Staging And Commit Guidance
+## 13. What Works Today (2026-08-12)
 
-Stage only files that are intentional and production-safe.
+This table shows what works now and what still needs work. A route in the code
+does not prove that every live module supports it.
 
-For this documentation/update task, the production-safe files are:
+| Area | Status | Current behavior and evidence | Production limitation |
+| --- | --- | --- | --- |
+| Keycloak browser SSO | Implemented | Core exposes `/auth/sso/start`, callback, session, refresh, and logout; tokens are validated in `app/core/auth.py`; secure-cookie and environment validation settings exist. | Production realm, SMTP, key rotation, client policy, MFA/AAL, and recovery procedures are deployment responsibilities. |
+| Canonical tenant registry | Implemented | Registry stores opaque tenant UUIDs and module routing fields; Core resolves mappings through `tenant_registry_client.py`. | Registry uses internal Basic authentication and its shared tenant table is not protected by database RLS. Replace Basic auth for production service trust. |
+| Native module integration | Partial | SRMS and eAppraisal adapters support inventory/read/provisioning paths; eLeave supports summary/history and a provisioning path. | Availability and payload compatibility still depend on each deployed native module; eLeave lacks complete inventory federation. |
+| Portal module workspace | Implemented | Catalog, readiness, handoff, iframe workspace, capability context, and native routes are wired. | Native apps must enforce their own authorization and iframe/message-origin controls. |
+| Tenant inventory | Partial | Automation Store has `native_tenant_inventory`; SRMS/eAppraisal imports and manual/global enrollment flows exist. | No standard SCIM endpoint, durable module outbox consumer, or complete eLeave inventory. Current import paths must not be allowed to auto-link on descriptive similarity. |
+| Tenant claim/linking | Implemented first tranche | `/federation` supports inventory, projections, claims, five-minute challenge, native confirmation, rejection, different-superadmin approval, optimistic link versions, uniqueness, and append-only link events. | Native authority assertion is HS256 with a module shared secret; migrate to asymmetric signatures or mTLS-bound proof and add key rotation/revocation. No portal claim UI is present. |
+| Canonical user directory | Partial | Federated snapshots, `(issuer, subject)` fields, module user mappings, confidence, enrollment jobs, drift, and Keycloak provisioning exist. | Current schema/workflows are not a complete SCIM 2.0 lifecycle; eLeave is not a full source; deprovisioning and group lifecycle need stronger contracts. |
+| Enrollment jobs | Implemented first tranche | Preview/apply, status, retry, stale-job recovery, reconcile plans, provision-missing, password reset, welcome and identity sync endpoints exist. | Production queue isolation, bounded concurrency, dead-letter handling, idempotency across every module, and operator approval gates require validation. |
+| Module handoff | Implemented | Short-lived, audience-bound JWTs, target-route constraints, host allowlist, `jti`, and Postgres replay claims are present. | HS256 expands secret exposure; use per-module asymmetric keys, strict single audience, sender constraints where feasible, and fail closed if replay storage is unavailable. |
+| Tenant isolation | Partial | Token tenant-conflict checks, tenant-scoped API policy, native module tenant models, and explicit mappings exist. | No consistent request-wide tenant context middleware plus PostgreSQL `ENABLE/FORCE ROW LEVEL SECURITY` on every shared tenant table. Cache/object-store/search/queue isolation must be audited. |
+| RBAC | Partial | HRIS coarse roles and native module fine-grained roles are separated; persona checks protect privileged endpoints. | Tenant-specific entitlement mapping, access reviews, separation of duties, and negative cross-tenant tests must be completed across all modules. |
+| Observability/audit | Partial | Correlation IDs, link events, provisioning/email audit, probe history, drift snapshots, and operational docs exist. | Central immutable audit retention, tenant-scoped security alerts, SIEM export, redaction validation, and federation SLOs need deployment and testing. |
+| SCIM 2.0 | Planned | Existing inventories and provisioning services are useful implementation inputs. | RFC 7643 schema discovery, `/Users`, `/Groups`, enterprise extension, lifecycle semantics, and RFC 7644 protocol behavior are not implemented. |
+
+Verified on this audit:
 
 ```powershell
-git add docs/PROJECT_SETUP_AND_INTEGRATION_GUIDE.md docker-compose.yml docker-compose.keycloak.yml scripts/prepare_docker_dev_env.py
+Set-Location apps/backend/hris-core-api
+python -m pytest -q
+# 76 passed
+Set-Location ../../..
 ```
 
-For the identity migration documentation/config update, also stage:
+Run each Python service's tests from its own directory. Running the Core and
+Gateway suites together from the repository root creates an import collision
+because both services use a top-level package named `app`.
 
-```powershell
-git add docs/ops/tenant-identity-migration-keycloak.md docker-compose.yml
-```
+## 14. Production Federation and Onboarding Plan
 
-Do not stage:
+### 14.1 Research used for this plan
 
-- Local `.env` files.
-- `logs/`.
-- Keycloak backups containing real identities/secrets.
-- Generated credentials under `apps/backend/hris-core-api/data/exports/`.
-- Native module historical docs unless a native module task explicitly changes them.
-- Unrelated app moves or deletes already present in the working tree.
+This plan uses three main sources:
+
+- [RFC 7643: SCIM Core Schema](https://www.rfc-editor.org/rfc/rfc7643.html),
+  which defines portable `User`, `Group`, enterprise-user, schema discovery,
+  attribute mutability, returned/uniqueness behavior, `externalId`, and privacy
+  handling. RFC 7643 is a schema specification; implement the HTTP lifecycle
+  with [RFC 7644](https://www.rfc-editor.org/rfc/rfc7644.html).
+- [NIST SP 800-63C-4 federation requirements](https://pages.nist.gov/800-63-4/sp800-63c/Federation/),
+  which require an RP to validate the expected issuer and assertion, associate
+  it with an RP account, restrict/check audience, protect against injection and
+  replay, securely link accounts, notify users of link changes, and define
+  disable/termination behavior. The organization must select and document its
+  target Federation Assurance Level (FAL); this guide does not claim a FAL.
+- [OWASP Multi-Tenant Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html),
+  which recommends deriving tenant context from verified identity, validating
+  it early, propagating it through all layers, never trusting a raw client
+  tenant ID, using defense-in-depth isolation such as PostgreSQL RLS, and
+  tenant-aware caches, files, logs, rate limits, and tests.
+
+Rules for this platform:
+
+1. Authentication federation (OIDC/Keycloak), user provisioning (SCIM), tenant
+   federation, and authorization are separate concerns. Success in one never
+   implicitly grants another.
+2. The stable person key is `(issuer, subject)`. Email, username, employee
+   number, name, domain, and phone are attributes, not linking authority.
+3. The stable tenant key is the HRIS canonical UUID. Every native module keeps
+   its immutable native tenant ID; the verified projection joins the two.
+4. SCIM `externalId` is assigned by the provisioning client and scoped to that
+   client. Use an opaque HRIS user/membership identifier, not email. A module's
+   own resource `id` remains module-owned.
+5. Tenant membership is explicit and many-to-many. A person may belong to more
+   than one tenant and must select an authorized tenant context; a token or
+   server session binds that context for each request.
+6. Descriptive tenant/user matching produces review candidates only. It never
+   creates an active link or membership.
+7. Provisioning is a durable, idempotent saga. Each external write uses an
+   operation ID/idempotency key; retries resume instead of duplicating tenants
+   or users.
+8. Federation assertions and module handoffs have one intended audience,
+   issuer/key validation, short expiry, nonce/state or `jti`, replay rejection,
+   and an allowlisted destination. Prefer asymmetric signatures with keys per
+   issuer and automated rotation over shared HS256 secrets.
+
+### 14.2 Main records and who owns them
+
+Use these main records. Each record has one clear job:
+
+| Record | Required identity and security fields |
+| --- | --- |
+| `canonical_tenant` | UUID, normalized unique label/code, status, workforce-boundary description, residency/tier, created/approved metadata. |
+| `native_tenant_inventory` | Module, immutable native ID, reported canonical UUID, routing key, display metadata, source version, last seen, status; never authoritative merely because names match. |
+| `tenant_module_projection` | Canonical UUID, module, native ID, state, link version, proof/audit reference, last verified; unique on both `(tenant,module)` and `(module,native_id)`. |
+| `principal` | Internal opaque ID plus unique `(issuer, subject)`; no tenant embedded in the principal key. |
+| `tenant_membership` | Principal, canonical tenant, lifecycle state, source, start/end time, assurance/proof, version. |
+| `module_identity` | Membership/principal, module, immutable module user ID, SCIM resource ID/external ID, version, sync state. |
+| `entitlement` | Tenant, module, native role/permission, mapped HRIS capability, provenance, approver, effective/expiry times. |
+| `federation_connection` | Tenant/IdP, issuer, discovery/JWKS metadata, client IDs, allowed algorithms, audiences, FAL/AAL policy, claim mapping, key state. Secrets belong in a secrets manager. |
+| `onboarding_operation` | Operation/idempotency ID, desired state, per-step result, retry count, next attempt, actor, correlation ID, timestamps. |
+| `audit_event` | Actor, tenant, subject, action, before/after references, result, source IP/client, correlation ID, tamper-evident timestamp; secrets and raw tokens excluded. |
+
+Place all shared-table tenant records behind PostgreSQL RLS. Application code
+must set a transaction-local tenant value after validating membership, and
+database roles used by the application must not have `BYPASSRLS`; apply
+`FORCE ROW LEVEL SECURITY` so table owners do not silently bypass policies.
+Platform-wide jobs use a separate, tightly controlled service role and must
+explicitly enumerate tenants.
+
+### 14.3 New tenant onboarding
+
+1. A superadmin creates a draft workforce boundary and selects modules,
+   identity source, regions, retention, data classification, and tenant admins.
+2. Core normalizes the label, enforces database uniqueness, generates the
+   canonical UUID and onboarding operation ID, and records an audit event.
+3. A second authorized operator approves high-impact production onboarding.
+4. Core creates each native tenant with the canonical UUID, a per-module
+   idempotency key, authenticated service identity, and explicit contract
+   version. Each module persists the UUID and returns its immutable native ID.
+5. Core verifies the returned identity, writes the projection, and exposes only
+   `verified` modules. Partial failures remain retryable without undoing valid
+   projections.
+6. Configure the tenant's IdP through reviewed OIDC/SAML metadata. Pin expected
+   issuer, client, redirect URIs, algorithms, keys, audience and claim mapping;
+   test signed login, logout, key rollover and break-glass recovery.
+7. Create the SCIM connection using a tenant-scoped OAuth client or mTLS
+   identity with least-privilege scopes. Discover `/ServiceProviderConfig`,
+   `/ResourceTypes`, and `/Schemas`; refuse unsupported mandatory features.
+8. Run SCIM import in preview: validate schemas, unique `externalId`, duplicate
+   candidates, manager/group references, required attributes and tenant scope.
+9. Approve and run bounded batches. Upsert principals, memberships, module
+   identities and groups idempotently; no password import. New accounts start
+   with minimum access until entitlement policy approves more.
+10. Reconcile counts and hashes, sample users, run negative tenant-isolation
+    tests, verify login/handoff and disable flows, then activate the tenant.
+11. Notify tenant administrators and users of account/link activation as policy
+    requires. Store evidence, not credentials, in the audit trail.
+
+### 14.4 Existing tenant and user migration
+
+1. Inventory native tenants and users read-only with immutable IDs, versions,
+   status, roles and source timestamps.
+2. Put unlinked native tenants in `unclaimed`. Candidate scores may assist
+   review but never authorize a link.
+3. Claim the exact native tenant using a short-lived proof bound to claim ID,
+   canonical UUID, module, native ID, action, audience, issuer, nonce/`jti`, and
+   expiry. A different superadmin approves it.
+4. Resolve users first by an existing verified `(issuer, subject)` or approved
+   immutable module mapping. If resolution depends on attributes, require a
+   reviewed, uniquely resolving attribute set and do not auto-merge ambiguous
+   records.
+5. Create memberships independently per tenant. Never move a person between
+   tenants because their email/domain changed.
+6. Preview role mapping and privileged grants. Require explicit approval for
+   tenant admin, HR, payroll, security, and bulk-export privileges.
+7. Apply in resumable batches and preserve native permission provenance. Do not
+   overwrite module-specific direct permissions with coarse Keycloak roles.
+8. Reconcile active, disabled, suspended, and terminated users. A SCIM
+   `active=false` disables access promptly; deletion follows legal retention
+   policy rather than immediately erasing regulated HR records.
+9. Notify subscribers when federated identifiers are linked/unlinked and when
+   accounts are disabled or terminated, subject to incident-safety policy.
+10. Complete dual-run monitoring, then remove legacy authentication and broad
+    migration credentials.
+
+### 14.5 Developer case scenarios
+
+These examples show how the rules should work in code.
+
+#### Scenario A: a new customer needs all three modules
+
+Company A has no HRIS, SRMS, eAppraisal, or eLeave records.
+
+1. A superadmin creates Company A in HRIS.
+2. HRIS creates canonical tenant UUID `C1` and operation ID `O1`.
+3. HRIS calls each module with `C1` and a separate idempotency key.
+4. The modules return native tenant IDs `S1`, `A1`, and `L1`.
+5. HRIS stores three verified links: `C1 -> S1`, `C1 -> A1`, and `C1 -> L1`.
+6. The portal shows a module only after its link is verified.
+
+If eLeave fails, HRIS keeps the successful SRMS and eAppraisal links. A retry
+uses the same operation and idempotency key, so it does not create duplicates.
+
+#### Scenario B: two modules contain tenants with the same name
+
+SRMS and eAppraisal both contain a tenant named `Central Services`, but neither
+record has a canonical HRIS UUID.
+
+1. Inventory adds both records as `unclaimed`.
+2. HRIS may show them as possible matches.
+3. HRIS must not link them by name, email domain, logo, or contact person.
+4. An administrator proves control of the exact native tenant.
+5. A different superadmin approves the link.
+
+The key lesson is simple: similar data helps people search; it does not prove
+that two tenant records are the same customer.
+
+#### Scenario C: an existing SRMS user is added to HRIS
+
+Ama already has SRMS user ID `U77` in verified tenant `C1`.
+
+1. The sync job reads `U77` from the SRMS inventory.
+2. HRIS looks for a verified module mapping or Keycloak `(issuer, subject)`.
+3. It does not merge Ama with another user only because the emails match.
+4. HRIS creates or links the Keycloak principal and creates membership in `C1`.
+5. The module identity record links the membership to SRMS user `U77`.
+6. Ama receives only the approved starting access.
+
+#### Scenario D: one person works for two tenants
+
+Kojo works for Company A and Company B.
+
+1. Kojo keeps one principal identified by `(issuer, subject)`.
+2. HRIS stores two memberships: one for `C1` and one for `C2`.
+3. Kojo chooses a tenant after login.
+4. The server checks that membership and creates a signed tenant context.
+5. Switching tenants clears cached page data and creates a new context.
+
+The browser must never change tenant context by sending an unchecked
+`X-Tenant-Id` header or query parameter.
+
+#### Scenario E: a user leaves the organization
+
+Efua leaves Company A but HR records must be retained.
+
+1. The source directory sends `active=false`, or an approved administrator
+   starts the disable action.
+2. HRIS disables the `C1` membership and revokes active sessions.
+3. Module access is removed through an idempotent job.
+4. Audit and required HR records remain under the retention policy.
+5. An older replayed event cannot reactivate the account because version and
+   tombstone checks reject it.
+
+#### Scenario F: a module is unavailable during onboarding
+
+SRMS is down while a tenant is being created.
+
+1. The onboarding operation records SRMS as `failed_retryable`.
+2. The portal shows the failed step and the operation ID.
+3. A worker retries with backoff and the original idempotency key.
+4. Other verified modules remain available.
+5. After the retry limit, the item moves to a dead-letter/manual-review state.
+
+#### Scenario G: a forged tenant request
+
+A valid Company A user changes a URL to contain Company B's tenant UUID.
+
+1. Core derives the active tenant from the verified session, not the URL.
+2. The membership check fails for Company B.
+3. Database RLS also blocks Company B rows as a second layer.
+4. Core returns a general `403` or `404` without confirming that the record
+   exists and writes a tenant-security audit event.
+
+#### Scenario H: SCIM sends the same request twice
+
+An identity provider retries a user creation request after a timeout.
+
+1. HRIS uses the tenant-scoped `externalId` and operation/idempotency data.
+2. It finds the first result and returns that resource instead of creating a
+   second user.
+3. A conflicting payload is rejected and sent for review.
+4. The audit log connects both requests with their correlation IDs.
+
+### 14.6 SCIM profile for HRIS
+
+Implement `/scim/v2` per RFC 7643 and RFC 7644:
+
+- `/ServiceProviderConfig`, `/ResourceTypes`, and `/Schemas`.
+- `/Users` with core attributes: `id`, client-scoped `externalId`, `userName`,
+  `name`, `displayName`, `emails`, `phoneNumbers`, `active`, `groups`, and
+  `meta` including `resourceType`, timestamps, version and location.
+- Enterprise extension
+  `urn:ietf:params:scim:schemas:extension:enterprise:2.0:User` for
+  `employeeNumber`, organization/division/department/costCenter and manager.
+- `/Groups` for membership/entitlement inputs. Group names do not directly
+  become privileged roles; policy maps approved groups to capabilities.
+- HRIS extension, versioned under an owned URN, for canonical membership ID and
+  workforce metadata that cannot be represented by standard fields. Keep
+  canonical tenant scope in the connection/server context and immutable server
+  data; do not trust a caller-supplied tenant extension by itself.
+- Strong ETags/`meta.version` and conditional updates to avoid lost writes;
+  stable pagination/sorting; PATCH, filtering and bulk behavior only when
+  advertised by service configuration.
+- Attribute allowlists, mutability enforcement, canonical email handling,
+  maximum sizes/counts, reference validation, and generic error responses that
+  do not leak cross-tenant existence.
+
+SCIM security baseline:
+
+- TLS everywhere; tenant-scoped OAuth 2.0 client credentials with short-lived
+  access tokens or mTLS; no long-lived Basic tokens in source or UI.
+- Scope every query, cache key, idempotency key, rate-limit bucket, object path,
+  queue message and audit event by canonical tenant.
+- Never return passwords, password hashes, recovery answers, raw tokens, client
+  secrets, or unrelated tenant attributes. Treat credentials as write-only if
+  supported at all; prefer IdP-managed activation/reset.
+- Rate limit per tenant and client, cap bulk payloads, validate content type and
+  schema, protect against filter/query abuse, and use transactional outbox plus
+  dead-letter/reconciliation for downstream propagation.
+- Maintain tombstones/version watermarks sufficient to prevent deleted users
+  from being resurrected by an older replayed event.
+
+### 14.7 Login, tenant switch, and module handoff
+
+For every federation response, Core/RP validates signature, allowed algorithm,
+issuer, single intended audience, expiry/not-before, nonce/state and transaction
+binding. It then looks up the unique `(issuer, subject)` principal and verifies
+an active membership before creating a session.
+
+The tenant switch endpoint must accept only a membership ID already authorized
+for the principal, rotate the session/CSRF token, and issue a new signed context.
+Raw `tenant_id` headers, query parameters, subdomains, origins, emails and
+module-returned tenant fields cannot override it. Downstream calls include the
+canonical tenant and exact native projection derived server-side.
+
+Module handoffs should use authorization-code-style, single-use redemption
+where modules can support it. If a JWT remains necessary, use asymmetric
+module-specific signing keys, one audience, five minutes or less, `jti`, exact
+tenant/native projection, subject, target route and purpose. Redeem server to
+server, reject replay atomically, and never place reusable bearer credentials
+in URLs, browser storage, referrers or logs.
+
+### 14.8 Security and operations checklist
+
+- Validate tenant context immediately after authentication and membership
+  resolution; make missing context a hard failure for tenant data paths.
+- Apply RLS and composite `(tenant_id, id)` keys/foreign keys to shared tables.
+- Prefix cache keys, object storage paths, search indexes and queue topics with
+  a validated tenant ID; prevent tenant-controlled path traversal.
+- Use least-privilege database/service identities per workload and separate
+  privileged platform jobs from tenant requests.
+- Encrypt in transit and at rest; keep tenant/client secrets in a managed secret
+  store; rotate keys with overlapping verification windows and revocation.
+- Redact HR data, tokens and secrets from logs; include tenant, actor, subject,
+  decision, correlation ID and source in security audit events.
+- Monitor cross-tenant authorization failures, claim/link changes, privileged
+  grants, bulk export, SCIM spikes, replay, key failures and reconciliation drift.
+- Back up and restore with tenant-aware access controls. Test full recovery and,
+  where promised, individual-tenant export/deletion/restoration.
+- Pen-test IDOR/BOLA, forged tenant context, confused deputy, cache bleed,
+  cross-tenant search, object-store paths, bulk SCIM, stale events, iframe
+  origins, token replay and administrator separation of duties.
+
+## 15. Backend Implementation Tasks
+
+Priorities: P0 blocks production federation; P1 is required before broad tenant
+rollout; P2 improves scale and operability. “Done” means code, migrations,
+negative tests, metrics, runbooks and rollback behavior are present.
+
+### P0 — trust boundary and tenant isolation
+
+- **BE-P0-01: request tenant context.** Add middleware/dependency that derives
+  principal and active membership from verified token/session, establishes one
+  immutable request tenant context, and rejects attempts to override it.
+- **BE-P0-02: database isolation.** Add `tenant_id` to all shared tenant data,
+  composite constraints/foreign keys, PostgreSQL `ENABLE` and `FORCE RLS`,
+  transaction-local context, non-bypass application roles, and migration tests.
+- **BE-P0-03: service authentication.** Replace Registry Basic auth and module
+  shared secrets with workload identity using mTLS or short-lived OAuth JWTs;
+  pin issuer/audience/algorithm and implement key rotation/revocation.
+- **BE-P0-04: harden claim proof.** Replace HS256 native confirmation with a
+  module-specific asymmetric signature or mTLS-bound assertion; store key ID,
+  proof version and replay record; expire abandoned claims automatically.
+- **BE-P0-05: authoritative projection gate.** Make all catalog, API proxy,
+  JIT, handoff and sync paths require a `verified` projection. Remove any
+  auto-link behavior based on names/domains and quarantine conflicts.
+- **BE-P0-06: canonical principal/membership schema.** Enforce unique
+  `(issuer,subject)`, unique `(principal,tenant)` membership, versioned lifecycle
+  states, module identities and explicit tenant selection. Migrate existing
+  identity mappings without email-based merges.
+- **BE-P0-07: federation validation policy.** Centralize issuer, key, algorithm,
+  audience, nonce/state, time-skew, replay and RP-account association checks;
+  add negative tests for injection and cross-client replay.
+- **BE-P0-08: secrets and logs.** Remove/rotate any generated credentials or
+  identity exports from deployable artifacts, prevent token/PII logging, and
+  integrate a production secret manager.
+
+### P0 — lifecycle correctness
+
+- **BE-P0-09: durable onboarding saga.** Persist state before external calls;
+  use idempotency keys, optimistic versions, bounded retry/backoff, dead-letter
+  state, compensation/manual recovery, and per-step audit evidence.
+- **BE-P0-10: deprovisioning.** Define disable, suspend, reactivate, unlink and
+  terminate semantics across Keycloak and modules. Revoke sessions promptly,
+  preserve records per retention policy, notify users, and block stale replay.
+- **BE-P0-11: eLeave parity.** Implement tenant and user inventory, immutable
+  identifiers, version/cursor, canonical UUID persistence, provisioning
+  idempotency, and native authority proof for eLeave.
+- **BE-P0-12: privileged entitlement governance.** Make native-to-HRIS mappings
+  tenant-scoped and versioned; require approval for privileged roles; never
+  manufacture native authority from a coarse HRIS role.
+
+### P1 — SCIM and reliable synchronization
+
+- **BE-P1-01: SCIM discovery/schema.** Implement service configuration,
+  resource types, schemas, Core User, Group and Enterprise User extension plus
+  a minimal versioned HRIS extension.
+- **BE-P1-02: SCIM protocol.** Implement tenant-scoped `/Users` and `/Groups`
+  GET/POST/PUT/PATCH/delete-or-deactivate, filtering, pagination, ETags,
+  conditional writes and RFC-compliant errors; advertise only supported
+  features.
+- **BE-P1-03: SCIM authorization.** Issue one least-privilege client per tenant
+  connection, support credential rotation/revocation, enforce attribute/scope
+  allowlists, and add per-client/tenant rate and bulk limits.
+- **BE-P1-04: event delivery.** Add transactional outbox at each module,
+  authenticated consumers, idempotent event inbox, ordered version handling,
+  tombstones and a dead-letter workflow.
+- **BE-P1-05: reconciliation.** Support incremental cursor scans every 5–15
+  minutes and daily full reconciliation as operational defaults, with manual
+  scan, lag/drift metrics and no automatic identity/link approval.
+- **BE-P1-06: migration tooling.** Provide preview/diff, duplicate quarantine,
+  resumable bounded batches, dry-run export, approvals, checksums/counts and
+  rollback/disable procedures. Never migrate password hashes.
+
+### P1/P2 — platform hardening and scale
+
+- **BE-P1-07:** Tenant-scope caches, rate limits, search, files, media, queues,
+  metrics and error messages; add automated cross-tenant bleed tests.
+- **BE-P1-08:** Move handoff to single-use server-side code redemption or
+  asymmetric JWTs; require replay-store health and verify iframe origins/CSP.
+- **BE-P1-09:** Centralize tamper-evident audit events and SIEM export with
+  retention, redaction, alerting and tenant/admin access policy.
+- **BE-P1-10:** Add onboarding/federation SLOs: queue age, completion latency,
+  failure/retry/dead-letter rate, reconciliation lag, drift, replay and auth
+  failure metrics.
+- **BE-P2-01:** Replace module-specific tenant columns with a versioned generic
+  module projection/configuration model while maintaining compatible APIs.
+- **BE-P2-02:** Add pairwise pseudonymous subject support per RP where privacy
+  risk warrants it; protect the correlation map as subscriber information.
+- **BE-P2-03:** Add chaos/recovery tests for IdP/module outage, lost events,
+  duplicate delivery, key rollover, partial onboarding and database restore.
+
+## 16. Frontend Implementation Tasks
+
+The frontend displays server decisions; it must never become an authorization
+or tenant-routing authority.
+
+### P0 — safe administrator and subscriber flows
+
+- **FE-P0-01: onboarding wizard.** Build draft → review → approve → provision →
+  verify → activate steps with module/IdP/SCIM readiness, per-step status,
+  idempotent retry and no exposure of client secrets or temporary passwords.
+- **FE-P0-02: inventory and claim console.** Show immutable native IDs, module,
+  routing data, last seen, conflicts and candidate evidence distinctly. Require
+  exact-record confirmation, reason, fresh authentication and a different
+  approver; never label a similarity candidate “matched”.
+- **FE-P0-03: tenant switcher.** List only server-returned active memberships;
+  switch through a protected endpoint, rotate session state, clear tenant
+  caches, reload capabilities, and show the active tenant persistently.
+- **FE-P0-04: lifecycle UI.** Provide preview and confirmation for suspend,
+  deactivate, unlink, reactivate and terminate; explain module impact,
+  retention and notification behavior; require step-up auth for destructive or
+  privileged actions.
+- **FE-P0-05: secure error states.** Use generic unauthorized/not-found messages
+  that do not reveal another tenant's resources. Correlation IDs may be shown
+  for support; tokens, proofs and secrets must never be rendered or logged.
+- **FE-P0-06: projection gating.** Render module links only from server catalog
+  state; visually distinguish provisioning, unclaimed, verification pending,
+  verified, conflict, suspended and failed-retryable states.
+
+### P1 — SCIM, migration and governance UX
+
+- **FE-P1-01: identity connection setup.** Accept metadata/connection details,
+  display issuer/audience/redirect/scopes and key expiry, send secrets directly
+  to the secure backend endpoint, and never read them back.
+- **FE-P1-02: SCIM preview.** Present counts and actionable categories:
+  create/update/disable/no-op, duplicate/ambiguous, invalid required fields,
+  missing manager/group, privileged grants and cross-tenant conflicts.
+- **FE-P1-03: batch operations.** Show operation ID, progress, bounded failures,
+  retries, dead letters and downloadable redacted reports. A refresh must resume
+  observation rather than resubmit the job.
+- **FE-P1-04: entitlement mapping.** Provide tenant-specific group/role mapping,
+  least-privilege defaults, privileged warnings, effective/expiry dates,
+  approval and change diff.
+- **FE-P1-05: user identity view.** Show principal, tenant memberships, linked
+  federated identifiers, module identities, lifecycle and provenance without
+  implying that matching emails are the same person. Support secure link/unlink
+  notices and recovery guidance.
+- **FE-P1-06: audit and operations.** Add filterable tenant-scoped audit,
+  onboarding health, reconciliation lag/drift and key-expiry views; enforce
+  pagination and redaction server-side.
+
+### P1/P2 — browser security, accessibility and testing
+
+- **FE-P1-07:** Use BFF HttpOnly/Secure/SameSite cookies, CSRF tokens, strict CSP,
+  frame ancestors and exact `postMessage` origin/source checks. Do not store
+  bearer/SCIM/module tokens in local/session storage or URL state.
+- **FE-P1-08:** Clear React Query/client caches and cancel in-flight requests on
+  tenant change/logout; include tenant only as a cache partition label derived
+  from authenticated server state, never as authorization evidence.
+- **FE-P1-09:** Add unit/E2E negative tests for forged tenant IDs, stale tabs,
+  back-button after switch, cross-tenant deep links, claim self-approval,
+  duplicate submit, iframe message spoofing and expired sessions.
+- **FE-P1-10:** Make wizard/status/error/approval experiences keyboard and screen
+  reader accessible, with focus management, live progress and non-color-only
+  state labels.
+- **FE-P2-01:** Add just-in-time support diagnostics that export only redacted
+  connection and correlation metadata, never identity payloads or secrets.
+
+## 17. Production Acceptance Gates
+
+Do not activate production federation until all applicable gates pass:
+
+1. **Identity:** expected issuer/key/algorithm/audience/nonce/state/replay tests,
+   unique `(issuer,subject)`, documented FAL/AAL and account recovery policy.
+2. **Tenant:** verified immutable projections only, explicit memberships,
+   request context validation, RLS, and negative cross-tenant API/database tests.
+3. **Provisioning:** SCIM contract/conformance tests, idempotency, ETags,
+   deactivate/reactivate/delete policy, group and manager cycle handling.
+4. **Security:** least-privilege clients, key rotation/revocation, secret scan,
+   CSP/CSRF/cookie/origin tests, BOLA/IDOR and confused-deputy penetration tests.
+5. **Reliability:** retry/dead-letter/reconciliation, partial saga recovery,
+   module/IdP outage, duplicate/out-of-order event and restore exercises.
+6. **Privacy:** data minimization, attribute purpose/trust agreement, retention,
+   user notices, redacted logs/exports and access review.
+7. **Operations:** dashboards/alerts/runbooks/on-call ownership, support tooling,
+   rollback, break glass, audit/SIEM retention and signed production approval.
+
+## 18. Documentation Maintenance Rule
+
+When federation code changes, update this guide's status matrix and the relevant
+contract/runbook in the same pull request. Label future designs **Planned** and
+do not move them to **Implemented** until migrations, production-safe defaults,
+authorization, negative tenant-isolation tests and operational recovery are all
+verified. Re-run Core, Gateway, Portal build, policy checks and module contract
+audits separately and record exact results; never infer production readiness
+from a single service's unit suite.

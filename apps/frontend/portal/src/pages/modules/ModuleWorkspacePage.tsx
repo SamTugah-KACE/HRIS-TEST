@@ -8,9 +8,9 @@ type SummaryCard = {
   value: string | number;
 };
 
-export const ModuleWorkspacePage: React.FC = () => {
+export const ModuleWorkspacePage: React.FC<{ fixedModuleId?: string }> = ({ fixedModuleId }) => {
   const { moduleId = '' } = useParams();
-  const normalizedModuleId = String(moduleId || '').toLowerCase();
+  const normalizedModuleId = String(fixedModuleId || moduleId || '').toLowerCase();
 
   // Summary cards ported from the module via MODULE_SUMMARY_UPDATE postMessage.
   const [summaryCards, setSummaryCards] = useState<SummaryCard[]>([]);

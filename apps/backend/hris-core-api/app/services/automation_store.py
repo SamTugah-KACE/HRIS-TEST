@@ -79,6 +79,7 @@ def _init_if_needed() -> None:
                     f"""
                     CREATE TABLE IF NOT EXISTS {_table('identity_mappings')} (
                         id BIGSERIAL PRIMARY KEY,
+                        keycloak_issuer TEXT,
                         keycloak_sub TEXT,
                         tenant_id TEXT NOT NULL,
                         module_name TEXT NOT NULL,
@@ -90,6 +91,14 @@ def _init_if_needed() -> None:
                         updated_at TIMESTAMPTZ NOT NULL,
                         UNIQUE (tenant_id, module_name, module_user_id)
                     )
+                    """
+                )
+                cur.execute(f"ALTER TABLE {_table('identity_mappings')} ADD COLUMN IF NOT EXISTS keycloak_issuer TEXT")
+                cur.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS identity_mapping_principal_idx
+                    ON {_table('identity_mappings')} (keycloak_issuer, keycloak_sub, tenant_id)
+                    WHERE keycloak_sub IS NOT NULL
                     """
                 )
                 cur.execute(
@@ -242,6 +251,108 @@ def _init_if_needed() -> None:
                 )
                 cur.execute(
                     f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS tenant_link_target_identity_uq
+                    ON {_table('tenant_link_ledger')} (target_module, target_tenant_ref)
+                    WHERE target_tenant_ref IS NOT NULL
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('native_tenant_inventory')} (
+                        module_name TEXT NOT NULL,
+                        native_tenant_id TEXT NOT NULL,
+                        reported_canonical_tenant_id TEXT,
+                        display_name TEXT NOT NULL,
+                        normalized_name TEXT NOT NULL,
+                        routing_key TEXT,
+                        source_version TEXT,
+                        source_updated_at TIMESTAMPTZ,
+                        inventory_status TEXT NOT NULL DEFAULT 'unclaimed',
+                        metadata_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        first_seen_at TIMESTAMPTZ NOT NULL,
+                        last_seen_at TIMESTAMPTZ NOT NULL,
+                        PRIMARY KEY (module_name, native_tenant_id)
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('tenant_module_projections')} (
+                        canonical_tenant_id TEXT NOT NULL,
+                        module_name TEXT NOT NULL,
+                        native_tenant_id TEXT,
+                        state TEXT NOT NULL,
+                        routing_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        link_version BIGINT NOT NULL DEFAULT 1,
+                        last_verified_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL,
+                        PRIMARY KEY (canonical_tenant_id, module_name),
+                        UNIQUE (module_name, native_tenant_id)
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('tenant_link_claims')} (
+                        claim_id UUID PRIMARY KEY,
+                        canonical_tenant_id TEXT NOT NULL,
+                        module_name TEXT NOT NULL,
+                        native_tenant_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        initiated_by TEXT NOT NULL,
+                        approved_by TEXT,
+                        challenge_hash TEXT,
+                        assertion_hash TEXT,
+                        expected_link_version BIGINT,
+                        expires_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        decided_at TIMESTAMPTZ,
+                        updated_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS tenant_link_claim_open_uq
+                    ON {_table('tenant_link_claims')} (canonical_tenant_id, module_name, native_tenant_id)
+                    WHERE state IN ('candidate_review', 'verification_pending', 'native_confirmed')
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('tenant_link_events')} (
+                        event_id UUID PRIMARY KEY,
+                        claim_id UUID,
+                        canonical_tenant_id TEXT NOT NULL,
+                        module_name TEXT NOT NULL,
+                        native_tenant_id TEXT,
+                        actor_sub TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        before_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        after_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        correlation_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('tenant_memberships')} (
+                        keycloak_issuer TEXT NOT NULL,
+                        keycloak_sub TEXT NOT NULL,
+                        canonical_tenant_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL,
+                        PRIMARY KEY (keycloak_issuer, keycloak_sub, canonical_tenant_id)
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
                     CREATE TABLE IF NOT EXISTS {_table('media_documents')} (
                         id BIGSERIAL PRIMARY KEY,
                         tenant_id TEXT NOT NULL,
@@ -266,7 +377,10 @@ def _init_if_needed() -> None:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=True)
+    # Audit/event payloads can contain UUID and timezone-aware datetime values
+    # returned by psycopg.  Persist their stable textual representation rather
+    # than letting an otherwise successful atomic workflow fail during audit.
+    return json.dumps(value, ensure_ascii=True, default=str)
 
 
 def ensure_ready() -> None:
@@ -275,6 +389,26 @@ def ensure_ready() -> None:
     Safe to call repeatedly.
     """
     _init_if_needed()
+
+
+def try_acquire_scheduler_lock(lock_key: int = 824_731_119):
+    """Return the owning connection, or None when another replica owns it."""
+    _init_if_needed()
+    conn = _connect()
+    row = conn.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (int(lock_key),)).fetchone()
+    if not row or not bool(row.get("acquired")):
+        conn.close()
+        return None
+    return conn
+
+
+def release_scheduler_lock(conn, lock_key: int = 824_731_119) -> None:
+    if conn is None:
+        return
+    try:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (int(lock_key),))
+    finally:
+        conn.close()
 
 
 def snapshot_tenant_mappings(rows: Iterable[Dict[str, Any]]) -> int:
@@ -322,6 +456,7 @@ def snapshot_tenant_mappings(rows: Iterable[Dict[str, Any]]) -> int:
 
 def record_identity_mapping(
     *,
+    keycloak_issuer: Optional[str] = None,
     keycloak_sub: Optional[str],
     tenant_id: str,
     module_name: str,
@@ -336,9 +471,10 @@ def record_identity_mapping(
         conn.execute(
             f"""
             INSERT INTO {_table('identity_mappings')}
-            (keycloak_sub, tenant_id, module_name, module_user_id, module_username, email, source, confidence, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (keycloak_issuer, keycloak_sub, tenant_id, module_name, module_user_id, module_username, email, source, confidence, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(tenant_id, module_name, module_user_id) DO UPDATE SET
+                keycloak_issuer=excluded.keycloak_issuer,
                 keycloak_sub=excluded.keycloak_sub,
                 module_username=excluded.module_username,
                 email=excluded.email,
@@ -347,6 +483,7 @@ def record_identity_mapping(
                 updated_at=excluded.updated_at
             """,
             (
+                str(keycloak_issuer or "").strip() or None,
                 keycloak_sub,
                 tenant_id,
                 module_name,
@@ -365,6 +502,7 @@ def resolve_identity_mapping(
     *,
     tenant_id: str,
     module_name: str,
+    keycloak_issuer: Optional[str] = None,
     keycloak_sub: Optional[str] = None,
     email: Optional[str] = None,
     username: Optional[str] = None,
@@ -375,6 +513,7 @@ def resolve_identity_mapping(
     if not tenant_id_value or not module_name_value:
         return None
 
+    keycloak_issuer_value = str(keycloak_issuer or "").strip()
     keycloak_sub_value = str(keycloak_sub or "").strip()
     email_value = str(email or "").strip().lower()
     username_value = str(username or "").strip().lower()
@@ -382,8 +521,12 @@ def resolve_identity_mapping(
     clauses = []
     args: list[Any] = [tenant_id_value, module_name_value]
     if keycloak_sub_value:
-        clauses.append("keycloak_sub = %s")
-        args.append(keycloak_sub_value)
+        if keycloak_issuer_value:
+            clauses.append("(keycloak_issuer = %s AND keycloak_sub = %s)")
+            args.extend([keycloak_issuer_value, keycloak_sub_value])
+        else:
+            clauses.append("keycloak_sub = %s")
+            args.append(keycloak_sub_value)
     if email_value:
         clauses.append("LOWER(email) = %s")
         args.append(email_value)
@@ -415,6 +558,7 @@ def resolve_identity_mapping(
 def resolve_identity_link(
     *,
     module_name: str,
+    keycloak_issuer: Optional[str] = None,
     keycloak_sub: Optional[str] = None,
     email: Optional[str] = None,
     username: Optional[str] = None,
@@ -426,6 +570,7 @@ def resolve_identity_link(
     if not module_name_value:
         return None
 
+    keycloak_issuer_value = str(keycloak_issuer or "").strip()
     keycloak_sub_value = str(keycloak_sub or "").strip()
     email_value = str(email or "").strip().lower()
     username_value = str(username or "").strip().lower()
@@ -433,8 +578,12 @@ def resolve_identity_link(
     clauses = []
     args: list[Any] = [module_name_value]
     if keycloak_sub_value:
-        clauses.append("keycloak_sub = %s")
-        args.append(keycloak_sub_value)
+        if keycloak_issuer_value:
+            clauses.append("(keycloak_issuer = %s AND keycloak_sub = %s)")
+            args.extend([keycloak_issuer_value, keycloak_sub_value])
+        else:
+            clauses.append("keycloak_sub = %s")
+            args.append(keycloak_sub_value)
     if email_value:
         clauses.append("LOWER(email) = %s")
         args.append(email_value)
@@ -448,7 +597,8 @@ def resolve_identity_link(
     with _connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT tenant_id, module_name, module_user_id, module_username, email, keycloak_sub, source, confidence, updated_at
+            SELECT tenant_id, module_name, module_user_id, module_username, email,
+                   keycloak_issuer, keycloak_sub, source, confidence, updated_at
             FROM {_table('identity_mappings')}
             WHERE module_name = %s
               AND ({where_any})
@@ -467,35 +617,9 @@ def resolve_identity_link(
             preferred_rows = [row for row in rows if str(row.get("tenant_id") or "").strip() == preferred]
             if preferred_rows:
                 return dict(preferred_rows[0])
-        avoid = str(avoid_tenant_id or "").strip()
-        candidate_rows = rows
-        if avoid:
-            non_avoid_rows = [row for row in rows if str(row.get("tenant_id") or "").strip() != avoid]
-            if non_avoid_rows:
-                candidate_rows = non_avoid_rows
-        # Deterministic fallback for duplicated cross-tenant links:
-        # if the same Keycloak principal maps to the same module user identity
-        # across tenants, select the most recently updated row instead of failing auth.
-        # This avoids SSO loops for migrated users while preserving strict behavior
-        # for truly ambiguous identities.
-        normalized_sub = keycloak_sub_value.strip().lower()
-        if normalized_sub:
-            same_sub_rows = [
-                row
-                for row in candidate_rows
-                if str(row.get("keycloak_sub") or "").strip().lower() == normalized_sub
-            ]
-            if same_sub_rows:
-                stable_user_keys = {
-                    (
-                        str(row.get("module_user_id") or "").strip().lower(),
-                        str(row.get("module_username") or "").strip().lower(),
-                        str(row.get("email") or "").strip().lower(),
-                    )
-                    for row in same_sub_rows
-                }
-                if len(stable_user_keys) == 1:
-                    return dict(same_sub_rows[0])
+        # Never choose a tenant from recency or matching profile attributes.
+        # An ambiguous principal-to-tenant relationship must be explicitly
+        # resolved through canonical membership administration.
         return None
     return dict(rows[0])
 
@@ -987,6 +1111,312 @@ def list_tenant_links(*, source_tenant_id: str, limit: int = 50) -> list[Dict[st
                 item["evidence_json"] = {}
         out.append(item)
     return out
+
+
+def upsert_native_tenant_inventory(
+    *, module_name: str, native_tenant_id: str, reported_canonical_tenant_id: Optional[str],
+    display_name: str, normalized_name: str, routing_key: Optional[str],
+    source_version: Optional[str], source_updated_at: Optional[str], metadata: Dict[str, Any],
+    inventory_status: str = "unclaimed",
+) -> Dict[str, Any]:
+    """Store module inventory without creating or linking a canonical tenant."""
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            INSERT INTO {_table('native_tenant_inventory')}
+              (module_name, native_tenant_id, reported_canonical_tenant_id, display_name,
+               normalized_name, routing_key, source_version, source_updated_at,
+               inventory_status, metadata_json, first_seen_at, last_seen_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)
+            ON CONFLICT(module_name, native_tenant_id) DO UPDATE SET
+              reported_canonical_tenant_id=excluded.reported_canonical_tenant_id,
+              display_name=excluded.display_name, normalized_name=excluded.normalized_name,
+              routing_key=excluded.routing_key, source_version=excluded.source_version,
+              source_updated_at=excluded.source_updated_at,
+              inventory_status=CASE
+                WHEN native_tenant_inventory.inventory_status='claimed' THEN 'claimed'
+                ELSE excluded.inventory_status END,
+              metadata_json=excluded.metadata_json,
+              last_seen_at=excluded.last_seen_at
+            RETURNING *
+            """,
+            (module_name.strip().lower(), native_tenant_id.strip(),
+             str(reported_canonical_tenant_id or "").strip() or None, display_name.strip(),
+             normalized_name.strip(), str(routing_key or "").strip() or None,
+             str(source_version or "").strip() or None, source_updated_at,
+             inventory_status.strip().lower(),
+             _json(metadata), now, now),
+        ).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def list_native_tenant_inventory(
+    *, module_name: Optional[str] = None, inventory_status: Optional[str] = None, limit: int = 500,
+) -> list[Dict[str, Any]]:
+    _init_if_needed()
+    clauses, args = [], []
+    if module_name:
+        clauses.append("module_name = %s")
+        args.append(module_name.strip().lower())
+    if inventory_status:
+        clauses.append("inventory_status = %s")
+        args.append(inventory_status.strip().lower())
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    safe_limit = max(1, min(int(limit), 2000))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM {_table('native_tenant_inventory')} {where} ORDER BY last_seen_at DESC LIMIT {safe_limit}",
+            tuple(args),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_module_projection(*, canonical_tenant_id: str, module_name: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT * FROM {_table('tenant_module_projections')} WHERE canonical_tenant_id=%s AND module_name=%s",
+            (canonical_tenant_id.strip(), module_name.strip().lower()),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_module_projection(
+    *, canonical_tenant_id: str, module_name: str, native_tenant_id: Optional[str],
+    state: str, routing: Dict[str, Any], verified: bool = False,
+) -> Dict[str, Any]:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""
+            INSERT INTO {_table('tenant_module_projections')}
+              (canonical_tenant_id,module_name,native_tenant_id,state,routing_json,link_version,last_verified_at,created_at,updated_at)
+            VALUES (%s,%s,%s,%s,%s::jsonb,1,%s,%s,%s)
+            ON CONFLICT(canonical_tenant_id,module_name) DO UPDATE SET
+              native_tenant_id=excluded.native_tenant_id, state=excluded.state,
+              routing_json=excluded.routing_json,
+              link_version=tenant_module_projections.link_version + 1,
+              last_verified_at=excluded.last_verified_at, updated_at=excluded.updated_at
+            RETURNING *
+            """,
+            (canonical_tenant_id.strip(), module_name.strip().lower(),
+             str(native_tenant_id or "").strip() or None, state.strip().lower(),
+             _json(routing), now if verified else None, now, now),
+        ).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def append_tenant_link_event(
+    *, event_id: str, claim_id: Optional[str], canonical_tenant_id: str,
+    module_name: str, native_tenant_id: Optional[str], actor_sub: str, action: str,
+    before: Dict[str, Any], after: Dict[str, Any], correlation_id: Optional[str],
+) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('tenant_link_events')}
+            (event_id,claim_id,canonical_tenant_id,module_name,native_tenant_id,actor_sub,action,before_json,after_json,correlation_id,created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s)""",
+            (event_id, claim_id, canonical_tenant_id, module_name.lower(), native_tenant_id,
+             actor_sub, action, _json(before), _json(after), correlation_id, _utc_now()),
+        )
+        conn.commit()
+
+
+def create_tenant_link_claim(
+    *, claim_id: str, canonical_tenant_id: str, module_name: str, native_tenant_id: str,
+    reason: str, initiated_by: str, challenge_hash: str, expires_at: str,
+    expected_link_version: Optional[int],
+) -> Dict[str, Any]:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""INSERT INTO {_table('tenant_link_claims')}
+            (claim_id,canonical_tenant_id,module_name,native_tenant_id,state,reason,initiated_by,
+             challenge_hash,expected_link_version,expires_at,created_at,updated_at)
+            VALUES (%s,%s,%s,%s,'verification_pending',%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+            (claim_id, canonical_tenant_id, module_name.lower(), native_tenant_id, reason,
+             initiated_by, challenge_hash, expected_link_version, expires_at, now, now),
+        ).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def get_tenant_link_claim(*, claim_id: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(f"SELECT * FROM {_table('tenant_link_claims')} WHERE claim_id=%s", (claim_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_tenant_link_claims(*, state: Optional[str] = None, limit: int = 200) -> list[Dict[str, Any]]:
+    _init_if_needed()
+    safe_limit = max(1, min(int(limit), 1000))
+    with _connect() as conn:
+        if state:
+            rows = conn.execute(
+                f"SELECT * FROM {_table('tenant_link_claims')} WHERE state=%s ORDER BY created_at DESC LIMIT {safe_limit}",
+                (state.lower(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(f"SELECT * FROM {_table('tenant_link_claims')} ORDER BY created_at DESC LIMIT {safe_limit}").fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_tenant_link_claim(
+    *, claim_id: str, expected_state: str, new_state: str, approved_by: Optional[str] = None,
+    assertion_hash: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    now = _utc_now()
+    terminal = new_state in {"approved", "rejected", "cancelled", "expired"}
+    with _connect() as conn:
+        row = conn.execute(
+            f"""UPDATE {_table('tenant_link_claims')} SET state=%s,
+            approved_by=COALESCE(%s,approved_by), assertion_hash=COALESCE(%s,assertion_hash),
+            decided_at=CASE WHEN %s THEN %s ELSE decided_at END, updated_at=%s
+            WHERE claim_id=%s AND state=%s RETURNING *""",
+            (new_state, approved_by, assertion_hash, terminal, now, now, claim_id, expected_state),
+        ).fetchone()
+        conn.commit()
+    return dict(row) if row else None
+
+
+def approve_tenant_link_claim(
+    *, claim_id: str, approved_by: str, correlation_id: Optional[str], event_id: str,
+) -> Dict[str, Any]:
+    """Atomically approve a native-confirmed claim and activate its projection."""
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        with conn.transaction():
+            claim = conn.execute(
+                f"SELECT * FROM {_table('tenant_link_claims')} WHERE claim_id=%s FOR UPDATE",
+                (claim_id,),
+            ).fetchone()
+            if not claim:
+                raise ValueError("claim_not_found")
+            if claim["state"] != "native_confirmed":
+                raise ValueError("claim_not_native_confirmed")
+            if str(claim["initiated_by"]) == str(approved_by):
+                raise ValueError("second_approver_required")
+            if claim.get("expires_at") and claim["expires_at"] <= datetime.now(timezone.utc):
+                raise ValueError("claim_expired")
+            projection = conn.execute(
+                f"SELECT * FROM {_table('tenant_module_projections')} WHERE canonical_tenant_id=%s AND module_name=%s FOR UPDATE",
+                (claim["canonical_tenant_id"], claim["module_name"]),
+            ).fetchone()
+            expected = claim.get("expected_link_version")
+            if expected is not None and int((projection or {}).get("link_version") or 0) != int(expected):
+                raise ValueError("projection_version_conflict")
+            conflicting = conn.execute(
+                f"""SELECT canonical_tenant_id FROM {_table('tenant_module_projections')}
+                WHERE module_name=%s AND native_tenant_id=%s AND canonical_tenant_id<>%s FOR UPDATE""",
+                (claim["module_name"], claim["native_tenant_id"], claim["canonical_tenant_id"]),
+            ).fetchone()
+            if conflicting:
+                raise ValueError("native_tenant_already_linked")
+            routing_row = conn.execute(
+                f"SELECT routing_key FROM {_table('native_tenant_inventory')} WHERE module_name=%s AND native_tenant_id=%s FOR UPDATE",
+                (claim["module_name"], claim["native_tenant_id"]),
+            ).fetchone()
+            if not routing_row:
+                raise ValueError("native_inventory_not_found")
+            before = dict(projection) if projection else {}
+            routing = {"routing_key": routing_row.get("routing_key")}
+            updated_projection = conn.execute(
+                f"""INSERT INTO {_table('tenant_module_projections')}
+                (canonical_tenant_id,module_name,native_tenant_id,state,routing_json,link_version,last_verified_at,created_at,updated_at)
+                VALUES (%s,%s,%s,'verified',%s::jsonb,1,%s,%s,%s)
+                ON CONFLICT(canonical_tenant_id,module_name) DO UPDATE SET
+                  native_tenant_id=excluded.native_tenant_id,state='verified',routing_json=excluded.routing_json,
+                  link_version=tenant_module_projections.link_version+1,
+                  last_verified_at=excluded.last_verified_at,updated_at=excluded.updated_at
+                RETURNING *""",
+                (claim["canonical_tenant_id"], claim["module_name"], claim["native_tenant_id"],
+                 _json(routing), now, now, now),
+            ).fetchone()
+            conn.execute(
+                f"UPDATE {_table('native_tenant_inventory')} SET inventory_status='claimed', last_seen_at=last_seen_at WHERE module_name=%s AND native_tenant_id=%s",
+                (claim["module_name"], claim["native_tenant_id"]),
+            )
+            approved = conn.execute(
+                f"""UPDATE {_table('tenant_link_claims')} SET state='approved',approved_by=%s,decided_at=%s,updated_at=%s
+                WHERE claim_id=%s RETURNING *""",
+                (approved_by, now, now, claim_id),
+            ).fetchone()
+            conn.execute(
+                f"""INSERT INTO {_table('tenant_link_events')}
+                (event_id,claim_id,canonical_tenant_id,module_name,native_tenant_id,actor_sub,action,before_json,after_json,correlation_id,created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,'claim.approved',%s::jsonb,%s::jsonb,%s,%s)""",
+                (event_id, claim_id, claim["canonical_tenant_id"], claim["module_name"],
+                 claim["native_tenant_id"], approved_by, _json(before), _json(dict(updated_projection)),
+                 correlation_id, now),
+            )
+    return {"claim": dict(approved), "projection": dict(updated_projection)}
+
+
+def upsert_tenant_membership(
+    *, keycloak_issuer: str, keycloak_sub: str, canonical_tenant_id: str, status: str, source: str,
+) -> None:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('tenant_memberships')}
+            (keycloak_issuer,keycloak_sub,canonical_tenant_id,status,source,created_at,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(keycloak_issuer,keycloak_sub,canonical_tenant_id) DO UPDATE SET
+              status=excluded.status, source=excluded.source, updated_at=excluded.updated_at""",
+            (keycloak_issuer, keycloak_sub, canonical_tenant_id, status, source, now, now),
+        )
+        conn.commit()
+
+
+def get_tenant_membership(*, keycloak_issuer: str, keycloak_sub: str, canonical_tenant_id: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT * FROM {_table('tenant_memberships')} WHERE keycloak_issuer=%s AND keycloak_sub=%s AND canonical_tenant_id=%s",
+            (keycloak_issuer, keycloak_sub, canonical_tenant_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_principal_tenant(
+    *, keycloak_issuer: str, keycloak_sub: str, preferred_tenant_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a canonical tenant from active membership, never profile labels."""
+    _init_if_needed()
+    issuer = str(keycloak_issuer or "").rstrip("/")
+    subject = str(keycloak_sub or "").strip()
+    if not issuer or not subject:
+        return None
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT canonical_tenant_id, status, source, updated_at
+            FROM {_table('tenant_memberships')}
+            WHERE keycloak_issuer=%s AND keycloak_sub=%s AND status='active'
+            ORDER BY updated_at DESC""",
+            (issuer, subject),
+        ).fetchall()
+    if not rows:
+        return None
+    preferred = str(preferred_tenant_id or "").strip()
+    if preferred:
+        row = next((item for item in rows if str(item["canonical_tenant_id"]) == preferred), None)
+        if row:
+            return {"tenant_id": str(row["canonical_tenant_id"]), "source": "canonical_membership"}
+    tenant_ids = {str(item["canonical_tenant_id"]) for item in rows}
+    if len(tenant_ids) != 1:
+        return None
+    return {"tenant_id": next(iter(tenant_ids)), "source": "canonical_membership"}
 
 
 def upsert_media_document(

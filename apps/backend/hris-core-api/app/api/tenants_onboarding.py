@@ -1,4 +1,7 @@
 from typing import Any, Dict, Optional
+from uuid import uuid4
+import hashlib
+import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -18,8 +21,22 @@ from app.services.tenant_storage_service import TenantStorageService
 from app.services.tenant_registry_client import get_tenant_mapping, refresh_tenant_mapping_cache
 from app.services.tenant_registry_client import list_tenant_mappings
 from app.services.tenant_registry_client import import_tenant
+from app.clients import eappraisal_client, srms_client
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
+logger = logging.getLogger(__name__)
+
+
+def _module_provision_failure(module_name: str, exc: Exception, tenant_id: str) -> Dict[str, str]:
+    logger.exception(
+        "Native tenant provisioning failed",
+        extra={"module_name": module_name, "tenant_id": tenant_id},
+    )
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, str) and exc.status_code < 500:
+        detail = exc.detail
+    else:
+        detail = f"{module_name} provisioning failed; retry from the canonical tenant record"
+    return {"status": "failed", "detail": detail}
 
 
 class TenantBrandingUpdate(BaseModel):
@@ -40,15 +57,150 @@ class TenantOnboardImportIn(BaseModel):
     eappraisal_subdomain: Optional[str] = None
     eleave_subdomain: Optional[str] = None
     is_active: bool = True
+    enabled_modules: list[str] = []
+    primary_admin_email: Optional[str] = None
+    organization_email: Optional[str] = None
+    country: str = "GH"
+    organization_type: str = "PRIVATE"
+    employee_range: str = "0-10"
+    contact_person: Optional[str] = None
+    phone_number: Optional[str] = None
+    organization_nature: str = "single_managed"
+    subscription_plan: str = "Basic"
 
 @router.post("/onboarding/import")
 def import_tenant_onboarding(
     payload: TenantOnboardImportIn,
     user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
 ):
-    result = import_tenant(payload.model_dump())
-    body = result.get("payload")
-    return {"imported": True, "result": body}
+    body = payload.model_dump()
+    # New HRIS tenants always receive an opaque canonical identifier. Never let
+    # the registry infer identity from a human-readable tenant code.
+    if payload.tenant_id:
+        try:
+            canonical = get_tenant_mapping(str(payload.tenant_id))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Canonical tenant_id was not found") from exc
+        body["tenant_id"] = str(canonical.tenant_id)
+        body["code"] = canonical.code
+        body["name"] = canonical.name
+    else:
+        incoming_code = str(payload.code or "").strip().casefold()
+        incoming_name = str(payload.name or "").strip().casefold()
+        existing_tenants = list_tenant_mappings(limit=5000)
+        if any(str(row.code or "").strip().casefold() == incoming_code for row in existing_tenants):
+            raise HTTPException(status_code=409, detail="Tenant code already exists in HRIS")
+        if any(str(row.name or "").strip().casefold() == incoming_name for row in existing_tenants):
+            raise HTTPException(status_code=409, detail="Tenant name already exists in HRIS")
+        body["tenant_id"] = str(uuid4())
+    enabled_modules = {
+        str(value or "").strip().lower()
+        for value in body.pop("enabled_modules", [])
+        if str(value or "").strip()
+    }
+    admin_email = str(body.pop("primary_admin_email", "") or "").strip().lower()
+    organization_email = str(body.pop("organization_email", "") or admin_email).strip().lower()
+    country = str(body.pop("country", "GH") or "GH").strip()
+    organization_type = str(body.pop("organization_type", "PRIVATE") or "PRIVATE").strip().upper()
+    employee_range = str(body.pop("employee_range", "0-10") or "0-10").strip()
+    contact_person = str(body.pop("contact_person", "") or body["name"]).strip()
+    phone_number = str(body.pop("phone_number", "") or "").strip()
+    organization_nature = str(body.pop("organization_nature", "single_managed") or "single_managed").strip()
+    subscription_plan = str(body.pop("subscription_plan", "Basic") or "Basic").strip()
+    module_results: Dict[str, Any] = {}
+    # Routing metadata is generated only by a native module provisioning result.
+    body["eappraisal_subdomain"] = None
+    body["eleave_subdomain"] = None
+
+    if enabled_modules & {"srms", "eappraisal"} and not admin_email:
+        raise HTTPException(status_code=422, detail="primary_admin_email is required for native module provisioning")
+    if "srms" in enabled_modules and not phone_number:
+        raise HTTPException(status_code=422, detail="phone_number is required when provisioning Staff Records")
+
+    if "srms" in enabled_modules:
+        try:
+            provisioned = srms_client.provision_tenant({
+                "canonical_tenant_id": str(body["tenant_id"]), "name": str(body["name"]),
+                "admin_email": admin_email, "organization_email": organization_email,
+                "country": country, "organization_type": organization_type.title(),
+                "organization_nature": organization_nature, "employee_range": employee_range,
+                "contact_person": contact_person, "phone_number": phone_number,
+                "subscription_plan": subscription_plan,
+            })
+            routing_key = str(provisioned.get("routing_key") or "").strip()
+            native_tenant_id = str(provisioned.get("native_tenant_id") or "").strip()
+            schema_name = str(provisioned.get("schema_name") or "").strip()
+            if not routing_key or not native_tenant_id or not schema_name:
+                raise RuntimeError("SRMS provisioning did not return native tenant identity")
+            body["srms_slug"], body["srms_schema"] = routing_key, schema_name
+            module_results["srms"] = provisioned
+        except Exception as exc:
+            module_results["srms"] = _module_provision_failure("srms", exc, str(body["tenant_id"]))
+
+    if "eappraisal" in enabled_modules:
+        digest = hashlib.sha256(str(body["tenant_id"]).encode("utf-8")).hexdigest()[:24]
+        try:
+            provisioned = eappraisal_client.provision_tenant({
+                "canonical_tenant_id": str(body["tenant_id"]), "name": str(body["name"]),
+                "routing_key": f"t-{digest}", "admin_email": admin_email,
+                "organization_email": organization_email, "country": country,
+                "organization_type": organization_type, "employee_range": employee_range,
+            })
+            routing_key = str(provisioned.get("routing_key") or "").strip()
+            native_tenant_id = str(provisioned.get("native_tenant_id") or "").strip()
+            if not routing_key or not native_tenant_id:
+                raise RuntimeError("eAppraisal provisioning did not return native tenant identity")
+            body["eappraisal_subdomain"] = routing_key
+            module_results["eappraisal"] = provisioned
+        except Exception as exc:
+            module_results["eappraisal"] = _module_provision_failure("eappraisal", exc, str(body["tenant_id"]))
+
+    # Persist the canonical identity even after a partial native failure. This
+    # makes retries use the same UUID and turns onboarding into an idempotent
+    # saga instead of leaking an unreachable native tenant projection.
+    result = import_tenant(body)
+    registry_payload = result.get("payload") or {}
+
+    for module_name in ("srms", "eappraisal"):
+        if module_name not in module_results or not module_results[module_name].get("native_tenant_id"):
+            continue
+        provisioned = module_results[module_name]
+        routing_key = str(provisioned.get("routing_key") or "").strip()
+        native_tenant_id = str(provisioned.get("native_tenant_id") or "").strip()
+        automation_store.upsert_tenant_link(
+            source_tenant_id=str(body["tenant_id"]),
+            target_module=module_name,
+            target_tenant_ref=native_tenant_id,
+            decision="created",
+            evidence={"source": "trusted_provisioning_contract", "routing_key": routing_key},
+            run_id=user.request_id,
+        )
+        automation_store.upsert_module_projection(
+            canonical_tenant_id=str(body["tenant_id"]),
+            module_name=module_name,
+            native_tenant_id=native_tenant_id,
+            state="verified",
+            routing={"routing_key": routing_key, "proof_type": "trusted_provisioning_contract",
+                     "proof_reference": user.request_id, "provisioning": provisioned},
+            verified=True,
+        )
+        automation_store.upsert_native_tenant_inventory(
+            module_name=module_name,
+            native_tenant_id=native_tenant_id,
+            reported_canonical_tenant_id=str(body["tenant_id"]),
+            display_name=str(body["name"]),
+            normalized_name=str(body["name"]).strip().casefold(),
+            routing_key=routing_key or native_tenant_id,
+            source_version=str(provisioned.get("identity_version") or "provisioned-v1"),
+            source_updated_at=None,
+            metadata=provisioned,
+            inventory_status="claimed",
+        )
+
+    for module_name in sorted(enabled_modules - {"srms", "eappraisal"}):
+        module_results[module_name] = {"status": "pending", "detail": "native tenant provisioning contract not yet available"}
+    refresh_tenant_mapping_cache()
+    return {"imported": True, "result": registry_payload, "modules": module_results}
 
 
 @router.get("")

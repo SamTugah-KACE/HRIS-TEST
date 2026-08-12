@@ -23,6 +23,7 @@ from app.api.jit_setup import router as jit_setup_router
 from app.api.me import router as me_router
 from app.api.modules import router as modules_router, profile_router
 from app.api.tenants_onboarding import router as tenants_router
+from app.api.tenant_federation import router as tenant_federation_router
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
 from app.core.logging_config import configure_logging
@@ -437,6 +438,7 @@ app.include_router(employees_router)
 app.include_router(profile_router)
 app.include_router(modules_router)
 app.include_router(tenants_router)
+app.include_router(tenant_federation_router)
 app.include_router(integrations_debug_router)
 app.include_router(federated_directory_debug_router)
 app.include_router(integration_sync_router)

@@ -32,7 +32,8 @@ type ModuleNavItem = {
   id: string;
   label: string;
   icon?: string;
-  type: 'submenu' | 'action';
+  type?: 'submenu' | 'action' | 'link';
+  path?: string;
   children?: ModuleNavItem[];
 };
 
@@ -150,7 +151,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onTo
   const EMPLOYEE_LABELS: Record<string, string> = {
     srms: 'My Profile',
     eleave: 'My Leave',
-    eappraisal: 'My Appraisal',
+    eappraisal: 'Performance Appraisal',
   };
 
   const getModuleLabelForRole = (m: ModuleCatalogItem): string => {
@@ -204,7 +205,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onTo
 
   // Detect which module workspace is currently open (/modules/:id/native).
   const workspaceMatch = location.pathname.match(/^\/modules\/([^/]+)\/native/);
-  const activeWorkspaceModuleId = workspaceMatch ? workspaceMatch[1].toLowerCase() : null;
+  const activeWorkspaceModuleId = workspaceMatch
+    ? workspaceMatch[1].toLowerCase()
+    : location.pathname === '/employees' || location.pathname.startsWith('/employees/')
+      ? 'srms'
+      : location.pathname === '/modules/appraisal'
+        ? 'eappraisal'
+        : location.pathname === '/modules/leave'
+          ? 'eleave'
+          : null;
 
   // Send TRIGGER_ACTION to the target module iframe, then shift keyboard focus
   // into the iframe so that modal interactions (Tab, Escape, etc.) work immediately
@@ -216,6 +225,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onTo
       }),
     );
     // Small delay so the postMessage is processed and the modal is rendered before focus.
+    setTimeout(() => {
+      const iframe = document.querySelector<HTMLIFrameElement>('iframe[title]');
+      iframe?.focus();
+    }, 150);
+  };
+
+  const navigateModulePath = (moduleId: string, path: string) => {
+    if (!path.startsWith('/')) return;
+    window.dispatchEvent(
+      new CustomEvent(`hris:module-nav-go-${moduleId}`, {
+        detail: { path },
+      }),
+    );
     setTimeout(() => {
       const iframe = document.querySelector<HTMLIFrameElement>('iframe[title]');
       iframe?.focus();
@@ -270,7 +292,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onTo
                         key={child.id}
                         type="button"
                         onClick={() => {
-                          triggerModuleAction(moduleId, child.id);
+                          if (child.path) {
+                            navigateModulePath(moduleId, child.path);
+                          } else {
+                            triggerModuleAction(moduleId, child.id);
+                          }
                           onClose();
                         }}
                         className={clsx(
@@ -296,7 +322,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ open, onClose, collapsed, onTo
               key={item.id}
               type="button"
               onClick={() => {
-                triggerModuleAction(moduleId, item.id);
+                if (item.path) {
+                  navigateModulePath(moduleId, item.path);
+                } else {
+                  triggerModuleAction(moduleId, item.id);
+                }
                 onClose();
               }}
               className={clsx(

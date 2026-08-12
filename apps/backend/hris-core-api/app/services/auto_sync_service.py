@@ -14,7 +14,7 @@ from app.services.onboarding_automation import (
     sync_tenant_users_identity_snapshot,
     sync_tenant_users_and_send_welcome,
 )
-from app.services.tenant_inventory_import import import_missing_tenants_from_srms
+from app.services.tenant_inventory_import import import_missing_tenants_from_eappraisal, import_missing_tenants_from_srms
 from app.services.tenant_drift_sync import build_drift_snapshot
 from app.services.tenant_registry_client import list_tenant_mappings
 from app.services.user_drift_sync import build_global_user_drift
@@ -46,6 +46,9 @@ class _AutoSyncState:
 
     def run_cycle(self) -> Dict[str, Any]:
         settings = get_settings()
+        scheduler_lock = automation_store.try_acquire_scheduler_lock()
+        if scheduler_lock is None:
+            return {"run_mode": "automatic", "status": "skipped", "reason": "another_replica_is_reconciling"}
         actor = self._system_actor()
         logger.warning(
             "Auto-sync cycle starting: %s",
@@ -60,12 +63,25 @@ class _AutoSyncState:
                 ensure_ascii=True,
             ),
         )
-        import_result = None
+        import_result: Dict[str, Any] = {}
+        try:
+            return self._run_locked_cycle(settings=settings, actor=actor, import_result=import_result)
+        finally:
+            automation_store.release_scheduler_lock(scheduler_lock)
+
+    def _run_locked_cycle(self, *, settings, actor: AuthenticatedUser, import_result: Dict[str, Any]) -> Dict[str, Any]:
         if settings.onboarding_auto_sync_new_tenants:
-            import_result = import_missing_tenants_from_srms(
-                actor,
-                max_records=settings.startup_tenant_inventory_max_records,
-            )
+            for module_name, importer in (
+                ("srms", import_missing_tenants_from_srms),
+                ("eappraisal", import_missing_tenants_from_eappraisal),
+            ):
+                try:
+                    import_result[module_name] = importer(
+                        actor, max_records=settings.startup_tenant_inventory_max_records
+                    )
+                except Exception as exc:
+                    logger.warning("Tenant inventory scan unavailable module=%s error_type=%s", module_name, type(exc).__name__)
+                    import_result[module_name] = {"status": "unavailable", "error_type": type(exc).__name__}
         tenant_drift = build_drift_snapshot(actor, max_registry_tenants=settings.auto_sync_max_tenants)
         user_drift = build_global_user_drift(
             actor=actor,

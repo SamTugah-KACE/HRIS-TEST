@@ -42,3 +42,10 @@ def list_integration_tenant_users(
     if hasattr(adapter, "list_integration_tenant_users"):
         return adapter.list_integration_tenant_users(mapping, token, limit=limit)  # type: ignore[attr-defined]
     return {"tenant_id": mapping.tenant_id, "users": [], "total": 0}
+
+
+def provision_tenant(payload: Dict[str, Any]) -> Dict[str, Any]:
+    adapter = get_eappraisal_adapter()
+    if not hasattr(adapter, "provision_tenant"):
+        raise RuntimeError("Configured eAppraisal adapter does not support tenant provisioning")
+    return adapter.provision_tenant(payload)  # type: ignore[attr-defined]

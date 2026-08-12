@@ -8,6 +8,11 @@ import {
   getTenantStorageProviders,
   getModuleReadinessSnapshot,
   getJitAuditSnapshot,
+  listNativeTenantInventory,
+  createTenantLinkClaim,
+  confirmTenantLinkClaim,
+  approveTenantLinkClaim,
+  listTenantLinkClaims,
   listTenants,
   runFederatedKeycloakSync,
   type FederatedKeycloakSyncResponse,
@@ -18,6 +23,8 @@ import {
   type TenantRow,
   type ModuleReadinessSnapshotResponse,
   type JitAuditSnapshotResponse,
+  type NativeTenantInventoryRow,
+  type TenantLinkClaim,
 } from '../../api/hrisCoreClient';
 import { useAuth } from '../../auth/AuthProvider';
 import { HRIS_ROLES } from '../../auth/roles';
@@ -32,10 +39,16 @@ export const TenantManagementPage: React.FC = () => {
     tenant_id: '',
     code: '',
     name: '',
-    srms_schema: '',
-    srms_slug: '',
-    eappraisal_subdomain: '',
-    eleave_subdomain: '',
+    primary_admin_email: '',
+    organization_email: '',
+    country: 'GH',
+    organization_type: 'PRIVATE',
+    employee_range: '0-10',
+    contact_person: '',
+    phone_number: '',
+    organization_nature: 'single_managed',
+    subscription_plan: 'Basic',
+    enabled_modules: ['srms', 'eappraisal'] as string[],
     is_active: true,
   });
   const [tenants, setTenants] = useState<TenantRow[]>([]);
@@ -71,6 +84,16 @@ export const TenantManagementPage: React.FC = () => {
   const [jitAuditBusy, setJitAuditBusy] = useState(false);
   const [jitAuditError, setJitAuditError] = useState('');
   const [jitAuditResult, setJitAuditResult] = useState<JitAuditSnapshotResponse | null>(null);
+  const [nativeInventory, setNativeInventory] = useState<NativeTenantInventoryRow[]>([]);
+  const [claimModule, setClaimModule] = useState('eappraisal');
+  const [claimNativeTenantId, setClaimNativeTenantId] = useState('');
+  const [claimReason, setClaimReason] = useState('Verified customer request to federate the native tenant');
+  const [activeClaim, setActiveClaim] = useState<TenantLinkClaim | null>(null);
+  const [claimChallenge, setClaimChallenge] = useState('');
+  const [claimAssertion, setClaimAssertion] = useState('');
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimError, setClaimError] = useState('');
+  const [openClaims, setOpenClaims] = useState<TenantLinkClaim[]>([]);
 
   const selectedTenant = useMemo(
     () => tenants.find((t) => t.tenant_id === selectedTenantId) || null,
@@ -88,6 +111,8 @@ export const TenantManagementPage: React.FC = () => {
     isSuperAdmin &&
     onboardPayload.code.trim() &&
     onboardPayload.name.trim() &&
+    onboardPayload.primary_admin_email.trim() &&
+    (!onboardPayload.enabled_modules.includes('srms') || onboardPayload.phone_number.trim()) &&
     !onboardBusy
   );
 
@@ -114,6 +139,60 @@ export const TenantManagementPage: React.FC = () => {
     };
   }, [isSuperAdmin, user?.tenantId]);
 
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    Promise.all([listNativeTenantInventory(claimModule), listTenantLinkClaims()])
+      .then(([rows, claims]) => {
+        setNativeInventory(rows);
+        setOpenClaims(claims.filter((claim) => ['verification_pending', 'native_confirmed'].includes(claim.state)));
+        setClaimNativeTenantId((current) => current || rows.find((row) => row.inventory_status !== 'claimed')?.native_tenant_id || '');
+      })
+      .catch(() => setClaimError('Unable to load native tenant inventory.'));
+  }, [claimModule, isSuperAdmin]);
+
+  const beginTenantClaim = async () => {
+    if (!selectedTenantId || !claimNativeTenantId) return;
+    setClaimBusy(true); setClaimError('');
+    try {
+      const result = await createTenantLinkClaim({
+        canonical_tenant_id: selectedTenantId, module_name: claimModule,
+        native_tenant_id: claimNativeTenantId, reason: claimReason,
+      });
+      setActiveClaim(result.claim); setClaimChallenge(result.challenge); setClaimAssertion('');
+      setOpenClaims((claims) => [result.claim, ...claims.filter((claim) => claim.claim_id !== result.claim.claim_id)]);
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setClaimError(e.response?.data?.detail || 'Could not create tenant claim.');
+    } finally { setClaimBusy(false); }
+  };
+
+  const confirmTenantClaim = async () => {
+    if (!activeClaim || !claimAssertion.trim()) return;
+    setClaimBusy(true); setClaimError('');
+    try {
+      const result = await confirmTenantLinkClaim(activeClaim.claim_id, claimAssertion.trim());
+      setActiveClaim(result.claim);
+      setOpenClaims((claims) => claims.map((claim) => claim.claim_id === result.claim.claim_id ? result.claim : claim));
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setClaimError(e.response?.data?.detail || 'Native assertion was rejected.');
+    } finally { setClaimBusy(false); }
+  };
+
+  const approveTenantClaim = async () => {
+    if (!activeClaim) return;
+    setClaimBusy(true); setClaimError('');
+    try {
+      await approveTenantLinkClaim(activeClaim.claim_id, claimReason);
+      setActiveClaim({ ...activeClaim, state: 'approved' });
+      setOpenClaims((claims) => claims.filter((claim) => claim.claim_id !== activeClaim.claim_id));
+      setClaimChallenge(''); setClaimAssertion('');
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setClaimError(e.response?.data?.detail || 'A different superadmin must approve the confirmed claim.');
+    } finally { setClaimBusy(false); }
+  };
+
   const submitOnboarding = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmitOnboarding) return;
@@ -124,13 +203,11 @@ export const TenantManagementPage: React.FC = () => {
       const cleaned = {
         ...onboardPayload,
         tenant_id: onboardPayload.tenant_id.trim() || undefined,
-        srms_schema: onboardPayload.srms_schema.trim() || undefined,
-        srms_slug: onboardPayload.srms_slug.trim() || undefined,
-        eappraisal_subdomain: onboardPayload.eappraisal_subdomain.trim() || undefined,
-        eleave_subdomain: onboardPayload.eleave_subdomain.trim() || undefined,
+        primary_admin_email: onboardPayload.primary_admin_email.trim(),
+        organization_email: onboardPayload.organization_email.trim() || onboardPayload.primary_admin_email.trim(),
       };
       const response = await importTenantOnboarding(cleaned);
-      setOnboardResult(response.result ?? response);
+      setOnboardResult(response);
       // Refresh list so the new/updated tenant is visible immediately.
       const refreshed = await listTenants(500);
       setTenants(refreshed.tenants || []);
@@ -370,12 +447,39 @@ export const TenantManagementPage: React.FC = () => {
   return (
     <div className="space-y-6">
       {isSuperAdmin && (
+        <div className="card space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">Legacy native tenant claim</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              Names are discovery hints only. Select the exact native ID, obtain a signed assertion from an authority in that native tenant, then have a different HRIS superadmin approve it.
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <select className="input-field" value={claimModule} onChange={(e) => { setClaimModule(e.target.value); setClaimNativeTenantId(''); }}>
+              <option value="srms">Staff Records</option><option value="eappraisal">Performance Appraisal</option>
+            </select>
+            <select className="input-field" value={claimNativeTenantId} onChange={(e) => setClaimNativeTenantId(e.target.value)}>
+              <option value="">Select an unclaimed native tenant</option>
+              {nativeInventory.map((row) => <option key={`${row.module_name}:${row.native_tenant_id}`} value={row.native_tenant_id}>{row.display_name} — {row.native_tenant_id} ({row.inventory_status})</option>)}
+            </select>
+          </div>
+          <textarea className="input-field min-h-20" value={claimReason} onChange={(e) => setClaimReason(e.target.value)} aria-label="Claim reason" />
+          <button type="button" className="btn-primary" disabled={claimBusy || !selectedTenantId || !claimNativeTenantId} onClick={beginTenantClaim}>Create verification challenge</button>
+          {openClaims.length > 0 && <div className="space-y-2"><div className="text-xs font-medium">Open claims (select one to continue or approve)</div>{openClaims.map((claim) => <button type="button" className="block w-full rounded border border-gray-200 p-2 text-left text-xs" key={claim.claim_id} onClick={() => { setActiveClaim(claim); setClaimChallenge(''); setClaimAssertion(''); }}><span className="font-mono">{claim.claim_id}</span> — {claim.module_name} — {claim.state}</button>)}</div>}
+          {activeClaim && <div className="rounded border border-gray-200 p-3 text-xs"><div>Claim: <span className="font-mono">{activeClaim.claim_id}</span></div><div>State: {activeClaim.state}</div></div>}
+          {claimChallenge && <div><label className="text-xs font-medium">One-time challenge (expires in five minutes)</label><textarea readOnly className="input-field mt-1 min-h-20 font-mono text-xs" value={claimChallenge} /></div>}
+          {activeClaim?.state === 'verification_pending' && <div className="space-y-2"><label className="text-xs font-medium">Signed assertion returned by the native tenant authority</label><textarea className="input-field min-h-24 font-mono text-xs" value={claimAssertion} onChange={(e) => setClaimAssertion(e.target.value)} /><button type="button" className="btn-secondary" disabled={claimBusy || !claimAssertion.trim()} onClick={confirmTenantClaim}>Verify native assertion</button></div>}
+          {activeClaim?.state === 'native_confirmed' && <button type="button" className="btn-primary" disabled={claimBusy} onClick={approveTenantClaim}>Approve as second superadmin</button>}
+          {claimError && <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">{String(claimError)}</div>}
+        </div>
+      )}
+      {isSuperAdmin && (
         <div className="card">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Tenant onboarding (registry import)</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Tenant onboarding and module federation</h2>
               <p className="mt-1 text-xs text-gray-500">
-                Creates/updates a tenant in the Tenant Registry. Module enablement is inferred from routing metadata.
+                Creates a canonical tenant or provisions missing native modules for the explicitly selected tenant.
               </p>
             </div>
             <span className="inline-flex items-center gap-2 rounded-lg bg-brand-500/10 px-3 py-2 text-xs font-medium text-brand-600">
@@ -384,6 +488,21 @@ export const TenantManagementPage: React.FC = () => {
           </div>
 
           <form onSubmit={submitOnboarding} className="space-y-3">
+            {selectedTenant && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setOnboardPayload((p) => ({
+                  ...p,
+                  tenant_id: selectedTenant.tenant_id,
+                  code: selectedTenant.code,
+                  name: selectedTenant.name,
+                  is_active: selectedTenant.is_active,
+                }))}
+              >
+                Federate selected tenant by canonical ID
+              </button>
+            )}
             <div className="grid gap-3 md:grid-cols-2">
               <label className="space-y-1">
                 <span className="text-xs font-medium text-gray-600">Tenant code</span>
@@ -404,11 +523,43 @@ export const TenantManagementPage: React.FC = () => {
                 />
               </label>
               <label className="space-y-1">
-                <span className="text-xs font-medium text-gray-600">Tenant ID (optional)</span>
+                <span className="text-xs font-medium text-gray-600">Primary administrator email</span>
                 <input
                   className="input-field"
-                  value={onboardPayload.tenant_id}
-                  onChange={(e) => setOnboardPayload((p) => ({ ...p, tenant_id: e.target.value }))}
+                  type="email"
+                  value={onboardPayload.primary_admin_email}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, primary_admin_email: e.target.value }))}
+                  required
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Contact person</span>
+                <input
+                  className="input-field"
+                  value={onboardPayload.contact_person}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, contact_person: e.target.value }))}
+                  placeholder="Tenant administrator"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Contact phone</span>
+                <input
+                  className="input-field"
+                  type="tel"
+                  value={onboardPayload.phone_number}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, phone_number: e.target.value }))}
+                  required={onboardPayload.enabled_modules.includes('srms')}
+                  placeholder="Required for Staff Records"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-gray-600">Organization email</span>
+                <input
+                  className="input-field"
+                  type="email"
+                  value={onboardPayload.organization_email}
+                  onChange={(e) => setOnboardPayload((p) => ({ ...p, organization_email: e.target.value }))}
+                  placeholder="Defaults to administrator email"
                 />
               </label>
               <label className="flex items-center gap-2 pt-6">
@@ -420,41 +571,47 @@ export const TenantManagementPage: React.FC = () => {
                 <span className="text-sm text-gray-700">Active</span>
               </label>
               <label className="space-y-1">
-                <span className="text-xs font-medium text-gray-600">SRMS slug</span>
-                <input
-                  className="input-field"
-                  value={onboardPayload.srms_slug}
-                  onChange={(e) => setOnboardPayload((p) => ({ ...p, srms_slug: e.target.value }))}
-                />
+                <span className="text-xs font-medium text-gray-600">Country</span>
+                <input className="input-field" value={onboardPayload.country} onChange={(e) => setOnboardPayload((p) => ({ ...p, country: e.target.value }))} />
               </label>
               <label className="space-y-1">
-                <span className="text-xs font-medium text-gray-600">SRMS schema</span>
-                <input
-                  className="input-field"
-                  value={onboardPayload.srms_schema}
-                  onChange={(e) => setOnboardPayload((p) => ({ ...p, srms_schema: e.target.value }))}
-                />
+                <span className="text-xs font-medium text-gray-600">Organization type</span>
+                <select className="input-field" value={onboardPayload.organization_type} onChange={(e) => setOnboardPayload((p) => ({ ...p, organization_type: e.target.value }))}>
+                  <option value="PRIVATE">Private</option>
+                  <option value="PUBLIC">Public</option>
+                  <option value="CIVIL">Civil</option>
+                  <option value="NGO">NGO</option>
+                </select>
               </label>
-              <label className="space-y-1">
-                <span className="text-xs font-medium text-gray-600">eAppraisal subdomain</span>
-                <input
-                  className="input-field"
-                  value={onboardPayload.eappraisal_subdomain}
-                  onChange={(e) => setOnboardPayload((p) => ({ ...p, eappraisal_subdomain: e.target.value }))}
-                />
-              </label>
-              <label className="space-y-1">
-                <span className="text-xs font-medium text-gray-600">eLeave subdomain</span>
-                <input
-                  className="input-field"
-                  value={onboardPayload.eleave_subdomain}
-                  onChange={(e) => setOnboardPayload((p) => ({ ...p, eleave_subdomain: e.target.value }))}
-                />
-              </label>
+              <fieldset className="space-y-2 md:col-span-2">
+                <legend className="text-xs font-medium text-gray-600">Modules to provision</legend>
+                <div className="flex flex-wrap gap-4">
+                  {[
+                    ['srms', 'Staff Records'],
+                    ['eappraisal', 'Performance Appraisal'],
+                    ['eleave', 'Leave Management'],
+                  ].map(([id, label]) => (
+                    <label key={id} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={onboardPayload.enabled_modules.includes(id)}
+                        onChange={(e) => setOnboardPayload((p) => ({
+                          ...p,
+                          enabled_modules: e.target.checked
+                            ? [...p.enabled_modules, id]
+                            : p.enabled_modules.filter((value) => value !== id),
+                        }))}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500">HRIS generates canonical and native routing identifiers; names and codes are never used to match tenants.</p>
+              </fieldset>
             </div>
 
             <button className={clsx('btn-primary', onboardBusy && 'opacity-70')} disabled={!canSubmitOnboarding} type="submit">
-              {onboardBusy ? 'Importing…' : 'Import tenant'}
+              {onboardBusy ? 'Provisioning…' : onboardPayload.tenant_id ? 'Provision selected tenant' : 'Create and provision tenant'}
             </button>
 
             {onboardError && (
