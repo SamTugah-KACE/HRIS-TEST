@@ -8,6 +8,13 @@ claims queued jobs with `FOR UPDATE SKIP LOCKED`, allowing the same workflow in 
 local process, Docker Compose, or multiple Core replicas without duplicate job
 claims.
 
+Invitation delivery is a second durable workflow. Enrollment writes one
+`welcome_dispatch` queue row per user; it does not send a duplicate Core SMTP
+welcome. A single rate-limited dispatcher asks Keycloak to send the expiring
+`UPDATE_PASSWORD` action email. Transient Keycloak/provider failures use
+exponential backoff and open a provider-wide cooldown so a Gmail `454` throttle
+does not cause more authentication attempts.
+
 For a global job, `ENROLLMENT_REFRESH_TENANT_INVENTORY=true` makes the worker
 refresh SRMS and eAppraisal tenant inventories before it reads users. The two
 legacy `ENABLE_STARTUP_*_TENANT_INVENTORY_IMPORT` flags should remain `false`:
@@ -31,6 +38,12 @@ ENROLLMENT_REFRESH_TENANT_INVENTORY=true
 ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL=true
 ENROLLMENT_EMAIL_MAX_ATTEMPTS=3
 ENROLLMENT_EMAIL_RETRY_BASE_SECONDS=30
+INVITATION_DISPATCH_WORKER_ENABLED=true
+INVITATION_DISPATCH_INTERVAL_SECONDS=10
+INVITATION_DISPATCH_MAX_ATTEMPTS=6
+INVITATION_DISPATCH_RETRY_BASE_SECONDS=300
+INVITATION_DISPATCH_RETRY_MAX_SECONDS=3600
+INVITATION_DISPATCH_PROVIDER_COOLDOWN_SECONDS=900
 SMTP_VALIDATE_CERTS=true
 ```
 
@@ -40,9 +53,13 @@ Use `discover` first, inspect the job, then enqueue `apply` explicitly:
 POST /integrations/synchronization/enrollment/preview?max_users=0
 GET  /integrations/synchronization/enrollment/jobs/{job_id}
 POST /integrations/synchronization/enrollment/apply?max_users=0
+GET  /integrations/synchronization/enrollment/invitations/status
+POST /integrations/synchronization/enrollment/invitations/retry-failed?limit=100
 ```
 
 All endpoints require `hris:super_admin`. `202` means queued, not completed.
+Terminal invitation failures are never reset by routine enrollment. Explicitly
+retry them only after fixing the provider or authentication problem.
 Terminal statuses are:
 
 - `completed`: discovery and enrollment finished without reported user/source errors.
@@ -112,6 +129,27 @@ password rotation remains disabled.
 
 ## Password-reset email diagnosis
 
+## Install and activate the Keycloak email theme
+
+The installer is idempotent. It automatically detects a running Compose
+Keycloak or a conventional standalone installation such as
+`C:\keycloak-26.5.4`, copies/verifies the repository theme, and activates it on
+the configured realm:
+
+```powershell
+python scripts/install_keycloak_theme.py
+```
+
+For a non-standard standalone location:
+
+```powershell
+python scripts/install_keycloak_theme.py --keycloak-home C:\path\to\keycloak
+```
+
+Use `--restart` only when the running deployment caches an older theme. Docker
+Keycloak already receives the theme through the Compose read-only bind mount;
+the script verifies that mount instead of copying into the container.
+
 The public password-reset endpoint always returns `202` to prevent account
 enumeration. Authorized operators can inspect sanitized outcomes at:
 
@@ -127,6 +165,13 @@ SHA-256 prefixes in this diagnostic table.
 
 The readiness endpoint negotiates TLS and authenticates without sending a
 message or returning SMTP credentials.
+
+Gmail `550 5.4.5 Daily user sending limit exceeded` means authentication and
+theme rendering succeeded but the sender mailbox exhausted its provider quota.
+Do not test or retry repeatedly. Open the persistent provider circuit for at
+least 24 hours and allow the durable invitation queue to resume afterward.
+`INVITATION_DISPATCH_DAILY_LIMIT` should remain below the mailbox's real quota;
+the local Gmail development default is `400` per UTC day.
 
 For Gmail, use an application password or managed SMTP relay; ordinary account
 passwords are commonly rejected. Confirm the realm SMTP `from` address is

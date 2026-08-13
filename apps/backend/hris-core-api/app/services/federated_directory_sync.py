@@ -9,11 +9,9 @@ from fastapi import HTTPException
 from app.clients import eappraisal_client, srms_client
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
-from app.services.keycloak_provisioning import ensure_user_and_temp_password, send_required_actions_email
+from app.services.keycloak_provisioning import ensure_user_and_temp_password
 from app.services import automation_store
 from app.services.tenant_registry_client import get_tenant_mapping, list_tenant_mappings
-from app.services.tenant_branding_service import get_tenant_branding
-from app.services.welcome_email_service import check_smtp_readiness, send_welcome_email
 
 logger = logging.getLogger(__name__)
 
@@ -182,13 +180,21 @@ def build_federated_directory_snapshot_for_tenant(
         "eappraisal": {"status": "skipped", "detail": "not_attempted"},
         "eleave": {"status": "unsupported", "detail": "tenant_user_inventory_contract_not_implemented"},
     }
+    srms_projection = automation_store.get_module_projection(
+        canonical_tenant_id=tenant_id, module_name="srms"
+    )
+    has_srms = bool(mapping.srms_slug or mapping.srms_schema or srms_projection)
 
     # SRMS inventory (best-effort, may 404/429/etc).
     srms_token = _srms_effective_token(actor)
     srms_state = _srms_state or {}
     srms_throttled_until = float(srms_state.get("throttled_until_ts") or 0.0)
     srms_processed = int(srms_state.get("tenants_processed") or 0)
-    if srms_token and time.time() < srms_throttled_until:
+    if not has_srms:
+        module_status["srms"] = {
+            "status": "not_present", "detail": "no_native_module_projection"
+        }
+    elif srms_token and time.time() < srms_throttled_until:
         module_status["srms"] = {"status": "throttled", "detail": "cooldown_active"}
     elif srms_token and srms_processed >= int(settings.federated_directory_srms_max_tenants_per_run):
         module_status["srms"] = {"status": "limited", "detail": "max_tenants_per_run_reached"}
@@ -422,6 +428,7 @@ def sync_keycloak_from_federated_directory(
     skipped_no_temporary_password = 0
     failed_count = 0
     welcome_emails_sent = 0
+    welcome_emails_queued = 0
     welcome_emails_skipped = 0
     welcome_emails_failed = 0
     results: List[Dict[str, Any]] = []
@@ -436,8 +443,11 @@ def sync_keycloak_from_federated_directory(
         not effective_dry_run
         and settings.enable_federated_keycloak_welcome_email
     )
-    tenant_branding_cache: Dict[str, Dict[str, Any]] = {}
-    email_readiness = check_smtp_readiness() if welcome_email_enabled else {"ok": False, "reason": "disabled"}
+    email_readiness = {
+        "ok": welcome_email_enabled,
+        "stage": "durable_queue" if welcome_email_enabled else "disabled",
+        "reason": "keycloak_action_email_dispatcher" if welcome_email_enabled else "disabled",
+    }
 
     for tenant_row in tenants:
         t = tenant_row.get("tenant", {}) if isinstance(tenant_row.get("tenant"), dict) else {}
@@ -467,7 +477,7 @@ def sync_keycloak_from_federated_directory(
                 continue
             try:
                 roles = _roles_from_federated_user(user)
-                welcome_sent_for_user = False
+                welcome_status_for_user = "not_applicable_or_already_sent"
                 out = ensure_user_and_temp_password(
                     email=email,
                     username=username or email,
@@ -532,16 +542,14 @@ def sync_keycloak_from_federated_directory(
                     "existing_no_welcome_record"
                 )
                 if welcome_email_enabled and not welcome_already_sent:
-                    if not bool(email_readiness.get("ok")):
+                    if not user_id:
                         welcome_emails_failed += 1
                         automation_store.record_welcome_dispatch(
                             tenant_id=t_id, email=email, username=username or email,
                             keycloak_user_id=user_id or None, status="failed",
                             payload={
                                 "source": "federated_directory_sync",
-                                "reason": "email_readiness_failed",
-                                "stage": email_readiness.get("stage"),
-                                "provider_reason": email_readiness.get("reason"),
+                                "reason": "missing_keycloak_user_id",
                             },
                         )
                         results.append({
@@ -551,46 +559,23 @@ def sync_keycloak_from_federated_directory(
                             "login_state": str(out.get("login_state") or "unknown"),
                             "tenant_memberships": out.get("tenant_memberships") or [t_id],
                             "multi_tenant": len(out.get("tenant_memberships") or [t_id]) > 1,
-                            "welcome_status": "deferred_email_unavailable",
+                            "welcome_status": "failed_missing_keycloak_user_id",
                         })
                         continue
-                    if t_id not in tenant_branding_cache:
-                        try:
-                            tenant_branding_cache[t_id] = get_tenant_branding(t_id)
-                        except Exception:
-                            tenant_branding_cache[t_id] = {}
-                    branding = tenant_branding_cache.get(t_id) or {}
-                    tenant_name = str(t.get("name") or t_id)
                     try:
-                        if not temp_password:
-                            send_required_actions_email(user_id=user_id, actions=["UPDATE_PASSWORD"])
-                        email_result = send_welcome_email(
-                            to_email=email,
-                            tenant_name=tenant_name,
-                            username=username or email,
-                            temporary_password=temp_password or None,
-                            brand_name=str(branding.get("brand_name") or ""),
-                            support_email=str(branding.get("support_email") or ""),
-                            logo_primary_uri=str(branding.get("logo_primary_uri") or ""),
+                        queued = automation_store.enqueue_keycloak_invitation(
+                            tenant_id=t_id, email=email, username=username or email,
+                            keycloak_user_id=user_id,
                         )
-                        if bool(email_result.get("sent")):
-                            welcome_emails_sent += 1
-                            welcome_sent_for_user = True
-                            automation_store.record_welcome_dispatch(
-                                tenant_id=t_id,
-                                email=email,
-                                username=username or email,
-                                keycloak_user_id=user_id or None,
-                                status="sent",
-                                payload={"source": "federated_directory_sync", "status": status_text},
-                            )
-                        else:
+                        if str(queued.get("status")) == "sent":
                             welcome_emails_skipped += 1
-                            automation_store.record_welcome_dispatch(
-                                tenant_id=t_id, email=email, username=username or email,
-                                keycloak_user_id=user_id or None, status="skipped",
-                                payload={"source": "federated_directory_sync", "reason": email_result.get("reason")},
-                            )
+                            welcome_status_for_user = "already_sent"
+                        elif str(queued.get("status")) == "failed":
+                            welcome_emails_failed += 1
+                            welcome_status_for_user = "terminal_failure"
+                        else:
+                            welcome_emails_queued += 1
+                            welcome_status_for_user = "queued"
                     except Exception as email_exc:
                         welcome_emails_failed += 1
                         automation_store.record_welcome_dispatch(
@@ -618,7 +603,7 @@ def sync_keycloak_from_federated_directory(
                         "login_state": str(out.get("login_state") or "unknown"),
                         "tenant_memberships": out.get("tenant_memberships") or [t_id],
                         "multi_tenant": len(out.get("tenant_memberships") or [t_id]) > 1,
-                        "welcome_status": "sent" if welcome_sent_for_user else "not_applicable_or_already_sent",
+                        "welcome_status": welcome_status_for_user,
                     }
                 )
             except Exception as exc:
@@ -677,6 +662,7 @@ def sync_keycloak_from_federated_directory(
         "skipped_no_temporary_password": skipped_no_temporary_password,
         "failed_count": failed_count,
         "welcome_emails_sent": welcome_emails_sent,
+        "welcome_emails_queued": welcome_emails_queued,
         "welcome_emails_skipped": welcome_emails_skipped,
         "welcome_emails_failed": welcome_emails_failed,
         "email_readiness": email_readiness,

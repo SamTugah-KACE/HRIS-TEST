@@ -35,6 +35,7 @@ from app.services.keycloak_realm_email import configure_keycloak_realm_email_if_
 from app.services.keycloak_portal_client import configure_keycloak_portal_client_if_enabled
 from app.services.federated_directory_sync import sync_keycloak_from_federated_directory
 from app.services.enrollment_jobs import enqueue_enrollment, start_enrollment_worker_if_enabled, stop_enrollment_worker
+from app.services.invitation_dispatcher import start_invitation_dispatcher_if_enabled, stop_invitation_dispatcher
 from app.services.tenant_inventory_import import (
     import_missing_tenants_from_eappraisal,
     import_missing_tenants_from_srms,
@@ -146,6 +147,9 @@ def validate_runtime_settings() -> None:
                     {
                         "scanned": import_result.get("scanned", 0),
                         "inserted": import_result.get("inserted", 0),
+                        "native_inventory_upserted": import_result.get("native_inventory_upserted", 0),
+                        "canonical_tenants_created": import_result.get("canonical_tenants_created", 0),
+                        "projections_created": import_result.get("projections_created", 0),
                         "skipped": import_result.get("skipped", 0),
                         "errors_count": len(import_result.get("errors", []) or []),
                         "errors_sample": (import_result.get("errors", []) or [])[:10],
@@ -185,6 +189,9 @@ def validate_runtime_settings() -> None:
                     {
                         "scanned": import_result.get("scanned", 0),
                         "inserted": import_result.get("inserted", 0),
+                        "native_inventory_upserted": import_result.get("native_inventory_upserted", 0),
+                        "canonical_tenants_created": import_result.get("canonical_tenants_created", 0),
+                        "projections_created": import_result.get("projections_created", 0),
                         "skipped": import_result.get("skipped", 0),
                         "errors_count": len(import_result.get("errors", []) or []),
                         "errors_sample": (import_result.get("errors", []) or [])[:10],
@@ -242,11 +249,13 @@ def validate_runtime_settings() -> None:
             logger.exception("Startup post-deploy automation failed")
     start_auto_sync_loop_if_enabled()
     start_enrollment_worker_if_enabled()
+    start_invitation_dispatcher_if_enabled()
 
 
 @app.on_event("shutdown")
 def stop_background_workers() -> None:
     stop_enrollment_worker()
+    stop_invitation_dispatcher()
 
 
 def _wait_for_tenant_registry_if_needed() -> None:

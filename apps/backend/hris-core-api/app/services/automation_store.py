@@ -190,6 +190,22 @@ def _init_if_needed() -> None:
                     )
                     """
                 )
+                cur.execute(f"ALTER TABLE {_table('welcome_dispatch')} ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0")
+                cur.execute(f"ALTER TABLE {_table('welcome_dispatch')} ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ")
+                cur.execute(f"ALTER TABLE {_table('welcome_dispatch')} ADD COLUMN IF NOT EXISTS lease_started_at TIMESTAMPTZ")
+                cur.execute(f"ALTER TABLE {_table('welcome_dispatch')} ADD COLUMN IF NOT EXISTS error_category TEXT")
+                cur.execute(f"ALTER TABLE {_table('welcome_dispatch')} ADD COLUMN IF NOT EXISTS provider_status INTEGER")
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS welcome_dispatch_queue_idx ON {_table('welcome_dispatch')} (status, next_attempt_at)"
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('email_provider_state')} (
+                        provider TEXT PRIMARY KEY,
+                        circuit_open_until TIMESTAMPTZ,
+                        reason TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL
+                    )"""
+                )
                 cur.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {_table('enrollment_jobs')} (
@@ -952,6 +968,173 @@ def record_welcome_dispatch(
             ),
         )
         conn.commit()
+
+
+def enqueue_keycloak_invitation(
+    *, tenant_id: str, email: str, username: str, keycloak_user_id: str,
+) -> Dict[str, Any]:
+    """Durably queue one invitation while preserving successful idempotency."""
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        provider_state = conn.execute(
+            f"SELECT circuit_open_until FROM {_table('email_provider_state')} WHERE provider='keycloak_smtp'"
+        ).fetchone()
+        eligible_at = (
+            provider_state.get("circuit_open_until")
+            if provider_state and provider_state.get("circuit_open_until")
+            else now
+        )
+        row = conn.execute(
+            f"""
+            INSERT INTO {_table('welcome_dispatch')}
+              (tenant_id,email,username,keycloak_user_id,status,send_count,last_sent_at,
+               last_payload_json,attempt_count,next_attempt_at,lease_started_at,error_category,provider_status)
+            VALUES (%s,%s,%s,%s,'pending',0,%s,%s::jsonb,0,%s,NULL,NULL,NULL)
+            ON CONFLICT(tenant_id,email) DO UPDATE SET
+              username=excluded.username,
+              keycloak_user_id=excluded.keycloak_user_id,
+              status=CASE WHEN {_table('welcome_dispatch')}.status IN ('sent','failed') THEN {_table('welcome_dispatch')}.status ELSE 'pending' END,
+              next_attempt_at=CASE WHEN {_table('welcome_dispatch')}.status IN ('sent','failed') THEN NULL ELSE excluded.next_attempt_at END,
+              lease_started_at=NULL,
+              error_category=CASE WHEN {_table('welcome_dispatch')}.status IN ('sent','failed') THEN {_table('welcome_dispatch')}.error_category ELSE NULL END,
+              provider_status=CASE WHEN {_table('welcome_dispatch')}.status IN ('sent','failed') THEN {_table('welcome_dispatch')}.provider_status ELSE NULL END,
+              last_payload_json=CASE WHEN {_table('welcome_dispatch')}.status IN ('sent','failed') THEN {_table('welcome_dispatch')}.last_payload_json ELSE excluded.last_payload_json END
+            RETURNING *
+            """,
+            (tenant_id, email.lower().strip(), username, keycloak_user_id, now,
+             _json({"source": "federated_directory_sync", "delivery": "keycloak_action_email"}), eligible_at),
+        ).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def claim_next_keycloak_invitation() -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        conn.execute(
+            f"""UPDATE {_table('welcome_dispatch')}
+                SET status='retry_wait', next_attempt_at=%s, lease_started_at=NULL,
+                    error_category='abandoned_worker_lease'
+                WHERE status='sending' AND lease_started_at < NOW() - INTERVAL '10 minutes'""",
+            (now,),
+        )
+        row = conn.execute(
+            f"""
+            WITH candidate AS (
+              SELECT tenant_id,email FROM {_table('welcome_dispatch')}
+              WHERE status IN ('pending','retry_wait')
+                AND COALESCE(next_attempt_at,NOW()) <= NOW()
+                AND NOT EXISTS (
+                  SELECT 1 FROM {_table('email_provider_state')}
+                  WHERE provider='keycloak_smtp' AND circuit_open_until > NOW()
+                )
+                AND (
+                  SELECT count(*) FROM {_table('welcome_dispatch')}
+                  WHERE status='sent' AND last_sent_at >= date_trunc('day',NOW())
+                ) < %s
+              ORDER BY COALESCE(next_attempt_at,last_sent_at),tenant_id,email
+              FOR UPDATE SKIP LOCKED LIMIT 1
+            )
+            UPDATE {_table('welcome_dispatch')} dispatch
+            SET status='sending', lease_started_at=%s, attempt_count=attempt_count+1
+            FROM candidate
+            WHERE dispatch.tenant_id=candidate.tenant_id AND dispatch.email=candidate.email
+            RETURNING dispatch.*
+            """,
+            (int(get_settings().invitation_dispatch_daily_limit), now),
+        ).fetchone()
+        conn.commit()
+    return dict(row) if row else None
+
+
+def finish_keycloak_invitation(
+    *, tenant_id: str, email: str, status: str, payload: Dict[str, Any],
+    next_attempt_at: Optional[str] = None, error_category: Optional[str] = None,
+    provider_status: Optional[int] = None,
+) -> None:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        conn.execute(
+            f"""UPDATE {_table('welcome_dispatch')}
+                SET status=%s, send_count=send_count+CASE WHEN %s='sent' THEN 1 ELSE 0 END,
+                    last_sent_at=%s,last_payload_json=%s::jsonb,next_attempt_at=%s,
+                    lease_started_at=NULL,error_category=%s,provider_status=%s
+                WHERE tenant_id=%s AND email=%s""",
+            (status, status, now, _json(payload), next_attempt_at, error_category,
+             provider_status, tenant_id, email.lower().strip()),
+        )
+        conn.commit()
+
+
+def defer_pending_keycloak_invitations(*, next_attempt_at: str, error_category: str) -> int:
+    """Open a provider-wide circuit breaker after transient SMTP/Keycloak failure."""
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('email_provider_state')}
+                (provider,circuit_open_until,reason,updated_at)
+                VALUES ('keycloak_smtp',%s,%s,%s)
+                ON CONFLICT(provider) DO UPDATE SET
+                  circuit_open_until=GREATEST({_table('email_provider_state')}.circuit_open_until,excluded.circuit_open_until),
+                  reason=excluded.reason,updated_at=excluded.updated_at""",
+            (next_attempt_at, error_category, _utc_now()),
+        )
+        result = conn.execute(
+            f"""UPDATE {_table('welcome_dispatch')}
+                SET next_attempt_at=GREATEST(COALESCE(next_attempt_at,NOW()),%s),
+                    error_category=COALESCE(error_category,%s)
+                WHERE status IN ('pending','retry_wait')""",
+            (next_attempt_at, error_category),
+        )
+        conn.commit()
+    return int(result.rowcount or 0)
+
+
+def get_keycloak_invitation_queue_summary() -> Dict[str, Any]:
+    _init_if_needed()
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT status,count(*) AS count FROM {_table('welcome_dispatch')} GROUP BY status ORDER BY status"
+        ).fetchall()
+        next_row = conn.execute(
+            f"""SELECT min(next_attempt_at) AS next_attempt_at
+                FROM {_table('welcome_dispatch')}
+                WHERE status IN ('pending','retry_wait')"""
+        ).fetchone()
+        provider = conn.execute(
+            f"SELECT circuit_open_until,reason,updated_at FROM {_table('email_provider_state')} WHERE provider='keycloak_smtp'"
+        ).fetchone()
+    return {
+        "counts": {str(row["status"]): int(row["count"]) for row in rows},
+        "next_attempt_at": next_row.get("next_attempt_at") if next_row else None,
+        "provider_circuit": dict(provider) if provider else None,
+    }
+
+
+def retry_failed_keycloak_invitations(*, limit: int = 100) -> int:
+    """Explicitly reset terminal failures; never invoked automatically."""
+    _init_if_needed()
+    safe_limit = max(1, min(int(limit), 1000))
+    now = _utc_now()
+    with _connect() as conn:
+        result = conn.execute(
+            f"""WITH candidates AS (
+                  SELECT tenant_id,email FROM {_table('welcome_dispatch')}
+                  WHERE status='failed' ORDER BY last_sent_at LIMIT %s
+                  FOR UPDATE SKIP LOCKED
+                )
+                UPDATE {_table('welcome_dispatch')} dispatch
+                SET status='pending',attempt_count=0,next_attempt_at=%s,lease_started_at=NULL,
+                    error_category=NULL,provider_status=NULL
+                FROM candidates
+                WHERE dispatch.tenant_id=candidates.tenant_id AND dispatch.email=candidates.email""",
+            (safe_limit, now),
+        )
+        conn.commit()
+    return int(result.rowcount or 0)
 
 
 def upsert_tenant_setting(*, tenant_id: str, setting_key: str, value: Dict[str, Any]) -> None:

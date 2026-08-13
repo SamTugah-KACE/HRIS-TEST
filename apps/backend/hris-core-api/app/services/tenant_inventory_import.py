@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 from app.clients import srms_client
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
-from app.services.tenant_registry_client import list_tenant_mappings
+from app.services.tenant_registry_client import import_tenant_if_missing, list_tenant_mappings
 from app.services import automation_store
 from app.clients import eappraisal_client
 
@@ -40,6 +40,46 @@ def _record_explicit_projection(module_name: str, candidate: Dict[str, Any], sou
         },
         verified=True,
     )
+
+
+def _auto_create_canonical_tenant(
+    module_name: str, candidate: Dict[str, Any], source: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Compatibility bootstrap for deployments that do not yet use tenant claims.
+
+    A native tenant becomes its own canonical tenant. This deliberately creates
+    no cross-module correlation: another module remains a separate tenant unless
+    it reports the same canonical UUID or is linked through the federation flow.
+    """
+    result = import_tenant_if_missing(candidate)
+    canonical_id = _as_str(result.get("tenant_id"))
+    if not canonical_id:
+        raise RuntimeError("Tenant Registry import did not return a canonical tenant_id")
+    automation_store.upsert_native_tenant_inventory(
+        module_name=module_name,
+        native_tenant_id=_as_str(candidate.get("tenant_id")),
+        reported_canonical_tenant_id=canonical_id,
+        display_name=_as_str(candidate.get("name")),
+        normalized_name=_normalized_label(candidate.get("name")),
+        routing_key=_as_str(candidate.get("srms_slug") or candidate.get("eappraisal_subdomain")) or None,
+        source_version=_as_str(source.get("identity_version") or source.get("version")) or None,
+        source_updated_at=_as_str(source.get("updated_at")) or None,
+        metadata=source,
+        inventory_status="claimed",
+    )
+    automation_store.upsert_module_projection(
+        canonical_tenant_id=canonical_id,
+        module_name=module_name,
+        native_tenant_id=_as_str(candidate.get("tenant_id")),
+        state="verified",
+        routing={
+            "routing_key": _as_str(candidate.get("srms_slug") or candidate.get("eappraisal_subdomain")),
+            "proof_type": "compatibility_native_auto_import",
+            "source_version": _as_str(source.get("identity_version") or source.get("version")),
+        },
+        verified=True,
+    )
+    return result
 
 
 def _apply_explicit_reconciliation_alias(candidate: Dict[str, Any], module_name: str) -> Dict[str, Any]:
@@ -112,6 +152,8 @@ def import_missing_tenants_from_srms(actor: AuthenticatedUser, *, max_records: i
 
     scanned = 0
     inserted = 0
+    canonical_created = 0
+    projections_created = 0
     skipped = 0
     errors: List[Dict[str, str]] = []
 
@@ -134,6 +176,11 @@ def import_missing_tenants_from_srms(actor: AuthenticatedUser, *, max_records: i
             )
             if explicit:
                 _record_explicit_projection("srms", candidate, org)
+                projections_created += 1
+            elif settings.tenant_inventory_auto_create_canonical:
+                canonical_result = _auto_create_canonical_tenant("srms", candidate, org)
+                canonical_created += int(bool(canonical_result.get("inserted")))
+                projections_created += 1
             inserted += 1
         except Exception as exc:
             errors.append(
@@ -148,6 +195,9 @@ def import_missing_tenants_from_srms(actor: AuthenticatedUser, *, max_records: i
         "source": "srms",
         "scanned": scanned,
         "inserted": inserted,
+        "native_inventory_upserted": inserted,
+        "canonical_tenants_created": canonical_created,
+        "projections_created": projections_created,
         "skipped": skipped,
         "errors": errors[:50],
     }
@@ -203,6 +253,8 @@ def import_missing_tenants_from_eappraisal(
 
     scanned = 0
     inserted = 0
+    canonical_created = 0
+    projections_created = 0
     skipped = 0
     errors: List[Dict[str, str]] = []
 
@@ -225,6 +277,11 @@ def import_missing_tenants_from_eappraisal(
             )
             if explicit:
                 _record_explicit_projection("eappraisal", candidate, row)
+                projections_created += 1
+            elif settings.tenant_inventory_auto_create_canonical:
+                canonical_result = _auto_create_canonical_tenant("eappraisal", candidate, row)
+                canonical_created += int(bool(canonical_result.get("inserted")))
+                projections_created += 1
             inserted += 1
         except Exception as exc:
             errors.append(
@@ -239,6 +296,9 @@ def import_missing_tenants_from_eappraisal(
         "source": "eappraisal",
         "scanned": scanned,
         "inserted": inserted,
+        "native_inventory_upserted": inserted,
+        "canonical_tenants_created": canonical_created,
+        "projections_created": projections_created,
         "skipped": skipped,
         "errors": errors[:50],
     }

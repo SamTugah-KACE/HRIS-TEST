@@ -218,8 +218,32 @@ class Settings(BaseSettings):
     enrollment_refresh_tenant_inventory: bool = Field(
         True, alias="ENROLLMENT_REFRESH_TENANT_INVENTORY"
     )
+    tenant_inventory_auto_create_canonical: bool = Field(
+        False, alias="TENANT_INVENTORY_AUTO_CREATE_CANONICAL"
+    )
     enrollment_email_max_attempts: int = Field(3, alias="ENROLLMENT_EMAIL_MAX_ATTEMPTS")
     enrollment_email_retry_base_seconds: int = Field(30, alias="ENROLLMENT_EMAIL_RETRY_BASE_SECONDS")
+    invitation_dispatch_worker_enabled: bool = Field(
+        True, alias="INVITATION_DISPATCH_WORKER_ENABLED"
+    )
+    invitation_dispatch_interval_seconds: int = Field(
+        10, alias="INVITATION_DISPATCH_INTERVAL_SECONDS"
+    )
+    invitation_dispatch_max_attempts: int = Field(
+        6, alias="INVITATION_DISPATCH_MAX_ATTEMPTS"
+    )
+    invitation_dispatch_retry_base_seconds: int = Field(
+        300, alias="INVITATION_DISPATCH_RETRY_BASE_SECONDS"
+    )
+    invitation_dispatch_retry_max_seconds: int = Field(
+        3600, alias="INVITATION_DISPATCH_RETRY_MAX_SECONDS"
+    )
+    invitation_dispatch_provider_cooldown_seconds: int = Field(
+        900, alias="INVITATION_DISPATCH_PROVIDER_COOLDOWN_SECONDS"
+    )
+    invitation_dispatch_daily_limit: int = Field(
+        400, alias="INVITATION_DISPATCH_DAILY_LIMIT"
+    )
     enable_federated_keycloak_welcome_email: bool = Field(
         False, alias="ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL"
     )
@@ -367,6 +391,18 @@ class Settings(BaseSettings):
             raise ValueError("ENROLLMENT_EMAIL_MAX_ATTEMPTS must be at least 1")
         if self.enrollment_email_retry_base_seconds < 1:
             raise ValueError("ENROLLMENT_EMAIL_RETRY_BASE_SECONDS must be at least 1")
+        if self.invitation_dispatch_interval_seconds < 1:
+            raise ValueError("INVITATION_DISPATCH_INTERVAL_SECONDS must be at least 1")
+        if self.invitation_dispatch_max_attempts < 1:
+            raise ValueError("INVITATION_DISPATCH_MAX_ATTEMPTS must be at least 1")
+        if self.invitation_dispatch_retry_base_seconds < 1:
+            raise ValueError("INVITATION_DISPATCH_RETRY_BASE_SECONDS must be at least 1")
+        if self.invitation_dispatch_retry_max_seconds < self.invitation_dispatch_retry_base_seconds:
+            raise ValueError("INVITATION_DISPATCH_RETRY_MAX_SECONDS must be >= retry base")
+        if self.invitation_dispatch_provider_cooldown_seconds < 1:
+            raise ValueError("INVITATION_DISPATCH_PROVIDER_COOLDOWN_SECONDS must be at least 1")
+        if self.invitation_dispatch_daily_limit < 1:
+            raise ValueError("INVITATION_DISPATCH_DAILY_LIMIT must be at least 1")
         if self.auth_csrf_enabled and not str(self.auth_csrf_cookie_name or "").strip():
             raise ValueError("AUTH_CSRF_COOKIE_NAME cannot be empty when AUTH_CSRF_ENABLED=true")
         allowed_srms_modes = {"auto", "plain", "encrypted_envelope", "staff_records_response"}

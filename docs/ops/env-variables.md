@@ -45,6 +45,18 @@ Enrollment controls:
 - `STARTUP_FEDERATED_ENROLLMENT_MODE`: `disabled`, `discover`, or `apply`;
   startup only queues the durable job.
 - `ENROLLMENT_WORKER_ENABLED`: enables the durable enrollment worker.
+- `INVITATION_DISPATCH_WORKER_ENABLED`: enables the separate durable Keycloak
+  action-email dispatcher. Enrollment queues invitations and never sends a
+  duplicate Core SMTP welcome email.
+- `INVITATION_DISPATCH_INTERVAL_SECONDS`: minimum delay between Keycloak email
+  attempts; use at least `10` with Gmail SMTP.
+- `INVITATION_DISPATCH_MAX_ATTEMPTS`: terminal retry limit for an invitation.
+- `INVITATION_DISPATCH_RETRY_BASE_SECONDS` / `INVITATION_DISPATCH_RETRY_MAX_SECONDS`:
+  exponential retry bounds for transient Keycloak/provider failures.
+- `INVITATION_DISPATCH_PROVIDER_COOLDOWN_SECONDS`: defers the whole pending queue
+  after a transient provider failure so Gmail throttling is not amplified.
+- `INVITATION_DISPATCH_DAILY_LIMIT`: application-side safety ceiling for accepted
+  Keycloak invitation emails per UTC day. Keep it below the mailbox/provider quota.
 - `ENROLLMENT_REFRESH_TENANT_INVENTORY`: refreshes SRMS/eAppraisal tenants
   inside global enrollment jobs before user discovery.
 - `FEDERATED_KEYCLOAK_SYNC_MAX_USERS_PER_RUN`: `0` means all discovered users;

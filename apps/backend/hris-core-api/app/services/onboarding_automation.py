@@ -12,9 +12,7 @@ from app.core.settings import get_settings
 from app.services import automation_store
 from app.services.keycloak_provisioning import ensure_user_and_temp_password
 from app.services.tenant_inventory_import import import_missing_tenants_from_srms
-from app.services.tenant_branding_service import get_tenant_branding
 from app.services.tenant_registry_client import get_tenant_mapping, list_tenant_mappings
-from app.services.welcome_email_service import send_welcome_email
 
 logger = logging.getLogger(__name__)
 
@@ -645,10 +643,8 @@ def sync_tenant_users_and_send_welcome(
         write_tenant_id = _canonical_identity_tenant_id(tenant_id, tenant)
     else:
         write_tenant_id = tenant_id
-    tenant_name = tenant.name if tenant else tenant_id
-    branding = get_tenant_branding(write_tenant_id)
-
     sent = 0
+    queued = 0
     skipped = 0
     errors: List[Dict[str, str]] = []
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -678,30 +674,23 @@ def sync_tenant_users_and_send_welcome(
                 tenant_id=write_tenant_id,
                 default_role=default_hris_role,
                 roles=resolved_hris_roles if resolved_hris_roles else [],
+                send_temp_password=False,
+                allow_existing_user_password_reset=False,
             )
-            email_result = send_welcome_email(
-                to_email=email,
-                tenant_name=tenant_name,
-                username=username,
-                temporary_password=keycloak_result.get("temporary_password"),
-                brand_name=str(branding.get("brand_name") or ""),
-                support_email=str(branding.get("support_email") or ""),
-                logo_primary_uri=str(branding.get("logo_primary_uri") or ""),
-            )
-            if not email_result.get("sent"):
+            keycloak_user_id = str(keycloak_result.get("user_id") or "").strip()
+            if not keycloak_user_id:
                 skipped += 1
-                try:
-                    automation_store.record_welcome_dispatch(
-                        tenant_id=tenant_id,
-                        email=email,
-                        username=username,
-                        keycloak_user_id=keycloak_result.get("user_id"),
-                        status="skipped",
-                        payload={"keycloak": keycloak_result, "email": email_result},
-                    )
-                except Exception as exc:
-                    logger.warning("Welcome dispatch audit skipped for %s: %s", email, exc)
                 continue
+            invitation = automation_store.enqueue_keycloak_invitation(
+                tenant_id=write_tenant_id, email=email, username=username,
+                keycloak_user_id=keycloak_user_id,
+            )
+            if str(invitation.get("status")) == "sent":
+                skipped += 1
+            elif str(invitation.get("status")) == "failed":
+                errors.append({"email": email, "error": "invitation_terminal_failure"})
+            else:
+                queued += 1
 
             try:
                 automation_store.record_identity_mapping(
@@ -723,22 +712,13 @@ def sync_tenant_users_and_send_welcome(
                 "employee_id": user_id,
                 "email": email,
                 "idempotency_key": idem_key,
-                "status": "welcome_sent",
+                "status": "invitation_queued",
                 "keycloak": keycloak_result,
             }
             try:
                 automation_store.record_provisioning_audit(audit_payload)
-                automation_store.record_welcome_dispatch(
-                    tenant_id=write_tenant_id,
-                    email=email,
-                    username=username,
-                    keycloak_user_id=keycloak_result.get("user_id"),
-                    status="sent",
-                    payload=audit_payload,
-                )
             except Exception as exc:
-                logger.warning("Welcome/provisioning audit skipped for %s: %s", email, exc)
-            sent += 1
+                logger.warning("Invitation provisioning audit skipped for %s: %s", email, exc)
         except Exception as exc:
             errors.append({"email": email, "error": str(exc)})
 
@@ -747,6 +727,7 @@ def sync_tenant_users_and_send_welcome(
         "requested_tenant_id": tenant_id,
         "processed": len(users),
         "sent": sent,
+        "queued": queued,
         "skipped": skipped,
         "errors": errors[:100],
         "enabled": True,

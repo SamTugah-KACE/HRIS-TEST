@@ -92,11 +92,20 @@ def run_worker_once() -> bool:
             for row in (result.get("tenant_discovery") or [])
             if isinstance(row, dict)
         )
+        inventory_errors = sum(
+            len(row.get("errors") or []) + int(row.get("status") == "unavailable")
+            for row in inventory_refresh.get("sources", [])
+            if isinstance(row, dict)
+        )
         processed = int(result.get("processed_users") or 0)
-        if processed == 0 and discovery_errors:
+        if processed == 0 and (discovery_errors or inventory_errors):
             final_status = "failed"
-            final_error = f"No users discovered; {discovery_errors} upstream discovery error(s). Inspect result_json."
-        elif discovery_errors or int(result.get("failed_count") or 0):
+            final_error = (
+                "No users discovered; "
+                f"{discovery_errors} user-discovery and {inventory_errors} tenant-inventory "
+                "error(s). Inspect result_json."
+            )
+        elif discovery_errors or inventory_errors or int(result.get("failed_count") or 0):
             final_status = "completed_with_errors"
             final_error = None
         else:
@@ -106,8 +115,8 @@ def run_worker_once() -> bool:
             job_id=job_id, status=final_status, result=result, error=final_error
         )
         logger.warning(
-            "Enrollment job finished job_id=%s status=%s processed=%s discovery_errors=%s duration_ms=%s",
-            job_id, final_status, processed, discovery_errors, result["duration_ms"],
+            "Enrollment job finished job_id=%s status=%s processed=%s discovery_errors=%s inventory_errors=%s duration_ms=%s",
+            job_id, final_status, processed, discovery_errors, inventory_errors, result["duration_ms"],
         )
     except Exception as exc:
         automation_store.finish_enrollment_job(job_id=job_id, status="failed", error=f"{type(exc).__name__}: {exc}")

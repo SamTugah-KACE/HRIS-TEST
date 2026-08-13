@@ -81,6 +81,22 @@ def retry_federated_enrollment_job(
     return job
 
 
+@router.get("/enrollment/invitations/status")
+def get_invitation_queue_status(
+    user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
+):
+    """Sanitized queue health; never returns recipient addresses or credentials."""
+    return automation_store.get_keycloak_invitation_queue_summary()
+
+
+@router.post("/enrollment/invitations/retry-failed", status_code=status.HTTP_202_ACCEPTED)
+def retry_failed_invitations(
+    limit: int = Query(100, ge=1, le=1000),
+    user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
+):
+    return {"requeued": automation_store.retry_failed_keycloak_invitations(limit=limit)}
+
+
 class TenantUserProvisionRequest(BaseModel):
     email: str
     username: Optional[str] = None
