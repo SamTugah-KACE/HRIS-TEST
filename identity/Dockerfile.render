@@ -6,4 +6,4 @@ COPY themes/hris-platform /opt/keycloak/themes/hris-platform
 EXPOSE 10000
 
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
-CMD ["start", "--import-realm", "--http-enabled=true", "--http-port=10000", "--proxy-headers=xforwarded", "--hostname-strict=false", "--health-enabled=true"]
+CMD ["start", "--import-realm", "--http-enabled=true", "--http-port=10000", "--proxy-headers=xforwarded", "--hostname-strict=false", "--health-enabled=true", "--cache=local"]

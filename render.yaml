@@ -46,6 +46,10 @@ services:
         value: xforwarded
       - key: KC_HOSTNAME_STRICT
         value: "false"
+      # The free test topology runs exactly one Keycloak instance. Local cache
+      # avoids unnecessary JGroups cluster listeners and stale-node discovery.
+      - key: KC_CACHE
+        value: local
       - key: JAVA_OPTS_KC_HEAP
         value: -XX:InitialRAMPercentage=25 -XX:MaxRAMPercentage=60
 
