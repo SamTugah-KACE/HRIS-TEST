@@ -223,6 +223,23 @@ class HttpEappraisalAdapter(EappraisalAdapter):
         status_code = last_response.status_code if last_response is not None else 502
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"eAppraisal tenant provisioning authentication failed ({status_code})")
 
+    def activate_tenant_federation(self, native_tenant_id: str, canonical_tenant_id: str) -> Dict[str, Any]:
+        base_url = self._build_integration_base_url().rstrip("/")
+        url = f"{base_url}/api/hris/v1/integration/tenants/{native_tenant_id}/federation/activate"
+        last_response: Optional[httpx.Response] = None
+        with self._get_http_client() as client:
+            for headers in self._integration_header_candidates(None):
+                response = client.post(url, headers={**headers, "Content-Type": "application/json"}, json={"canonical_tenant_id": canonical_tenant_id})
+                last_response = response
+                if response.status_code in {401, 403}:
+                    continue
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"eAppraisal federation activation failed ({response.status_code})")
+                body = response.json()
+                return body if isinstance(body, dict) else {}
+        code = last_response.status_code if last_response is not None else 502
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"eAppraisal federation activation authentication failed ({code})")
+
     def _build_headers(
         self,
         mapping: TenantMapping,

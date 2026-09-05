@@ -49,3 +49,10 @@ def provision_tenant(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not hasattr(adapter, "provision_tenant"):
         raise RuntimeError("Configured eAppraisal adapter does not support tenant provisioning")
     return adapter.provision_tenant(payload)  # type: ignore[attr-defined]
+
+
+def activate_tenant_federation(native_tenant_id: str, canonical_tenant_id: str) -> Dict[str, Any]:
+    adapter = get_eappraisal_adapter()
+    if not hasattr(adapter, "activate_tenant_federation"):
+        raise RuntimeError("Configured eAppraisal adapter does not support federation activation")
+    return adapter.activate_tenant_federation(native_tenant_id, canonical_tenant_id)  # type: ignore[attr-defined]

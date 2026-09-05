@@ -1,0 +1,64 @@
+:root {
+  --hris-navy: #063866;
+  --hris-blue: #0b69b7;
+  --hris-cyan: #1db9cc;
+  --hris-ink: #132033;
+}
+
+body.kcBodyClass {
+  background:
+    radial-gradient(circle at 14% 20%, rgba(29,185,204,.26), transparent 32rem),
+    radial-gradient(circle at 86% 82%, rgba(60,130,246,.24), transparent 34rem),
+    linear-gradient(135deg, #041d35 0%, #063866 50%, #071b31 100%);
+  color: var(--hris-ink);
+  min-height: 100vh;
+}
+
+.login-pf-page { padding: 3rem 1rem; }
+.login-pf-page .card-pf,
+.pf-v5-c-login__main {
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 24px;
+  box-shadow: 0 28px 80px rgba(0,0,0,.34);
+  overflow: hidden;
+  backdrop-filter: blur(14px);
+}
+
+#kc-header-wrapper {
+  color: #fff;
+  font-size: clamp(1.5rem, 3vw, 2.35rem);
+  font-weight: 750;
+  letter-spacing: -.02em;
+  text-transform: none;
+}
+
+#kc-header-wrapper::after {
+  content: "People, performance, and work—securely connected.";
+  display: block;
+  font-size: .9rem;
+  font-weight: 400;
+  letter-spacing: .01em;
+  margin-top: .65rem;
+  opacity: .78;
+}
+
+#kc-page-title { color: var(--hris-navy); font-weight: 750; }
+.pf-v5-c-form-control,
+input[type="text"], input[type="password"] { border-radius: 10px !important; min-height: 44px; }
+.pf-v5-c-button.pf-m-primary,
+#kc-login {
+  background: linear-gradient(90deg, var(--hris-navy), var(--hris-blue));
+  border: 0;
+  border-radius: 10px;
+  min-height: 46px;
+  font-weight: 700;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.pf-v5-c-button.pf-m-primary:hover,
+#kc-login:hover { box-shadow: 0 10px 24px rgba(11,105,183,.25); transform: translateY(-1px); }
+a { color: var(--hris-blue); }
+
+@media (max-width: 600px) {
+  .login-pf-page { padding: 1.5rem .8rem; }
+  .login-pf-page .card-pf, .pf-v5-c-login__main { border-radius: 18px; }
+}

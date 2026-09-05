@@ -3,7 +3,7 @@ from uuid import uuid4
 import hashlib
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/tenants", tags=["tenants"])
 logger = logging.getLogger(__name__)
 
 
-def _module_provision_failure(module_name: str, exc: Exception, tenant_id: str) -> Dict[str, str]:
+def _module_provision_failure(module_name: str, exc: Exception, tenant_id: str) -> Dict[str, Any]:
     logger.exception(
         "Native tenant provisioning failed",
         extra={"module_name": module_name, "tenant_id": tenant_id},
@@ -36,12 +36,44 @@ def _module_provision_failure(module_name: str, exc: Exception, tenant_id: str) 
         detail = exc.detail
     else:
         detail = f"{module_name} provisioning failed; retry from the canonical tenant record"
-    return {"status": "failed", "detail": detail}
+    return {
+        "status": "failed",
+        "detail": detail,
+        "notification": {
+            "owner": module_name,
+            "status": "not_started",
+            "detail": "The native notification workflow did not start because provisioning failed.",
+        },
+    }
+
+
+def _module_summary(module_name: str, provisioned: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose only the safe, cross-module provisioning contract to callers."""
+    notification = provisioned.get("notification")
+    safe_notification = notification if isinstance(notification, dict) else {
+        "owner": module_name,
+        "status": "handled_by_native_workflow" if provisioned.get("created") else "not_repeated",
+        "detail": "The connected module owns administrator notification delivery.",
+    }
+    return {
+        "status": str(provisioned.get("status") or "ready"),
+        "created": bool(provisioned.get("created")),
+        "native_tenant_id": str(provisioned.get("native_tenant_id") or ""),
+        "routing_key": str(provisioned.get("routing_key") or ""),
+        "schema_name": str(provisioned.get("schema_name") or "") or None,
+        "notification": safe_notification,
+    }
 
 
 class TenantBrandingUpdate(BaseModel):
     brand_name: Optional[str] = None
+    short_name: Optional[str] = None
     support_email: Optional[str] = None
+    support_phone: Optional[str] = None
+    website: Optional[str] = None
+    locale: Optional[str] = None
+    timezone: Optional[str] = None
+    date_format: Optional[str] = None
     theme: Optional[Dict[str, Any]] = None
 
 
@@ -71,8 +103,10 @@ class TenantOnboardImportIn(BaseModel):
 @router.post("/onboarding/import")
 def import_tenant_onboarding(
     payload: TenantOnboardImportIn,
+    request: Request,
     user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
 ):
+    request_id = str(getattr(request.state, "correlation_id", "") or uuid4())
     body = payload.model_dump()
     # New HRIS tenants always receive an opaque canonical identifier. Never let
     # the registry infer identity from a human-readable tenant code.
@@ -133,7 +167,7 @@ def import_tenant_onboarding(
             if not routing_key or not native_tenant_id or not schema_name:
                 raise RuntimeError("SRMS provisioning did not return native tenant identity")
             body["srms_slug"], body["srms_schema"] = routing_key, schema_name
-            module_results["srms"] = provisioned
+            module_results["srms"] = _module_summary("srms", provisioned)
         except Exception as exc:
             module_results["srms"] = _module_provision_failure("srms", exc, str(body["tenant_id"]))
 
@@ -151,7 +185,7 @@ def import_tenant_onboarding(
             if not routing_key or not native_tenant_id:
                 raise RuntimeError("eAppraisal provisioning did not return native tenant identity")
             body["eappraisal_subdomain"] = routing_key
-            module_results["eappraisal"] = provisioned
+            module_results["eappraisal"] = _module_summary("eappraisal", provisioned)
         except Exception as exc:
             module_results["eappraisal"] = _module_provision_failure("eappraisal", exc, str(body["tenant_id"]))
 
@@ -173,7 +207,7 @@ def import_tenant_onboarding(
             target_tenant_ref=native_tenant_id,
             decision="created",
             evidence={"source": "trusted_provisioning_contract", "routing_key": routing_key},
-            run_id=user.request_id,
+            run_id=request_id,
         )
         automation_store.upsert_module_projection(
             canonical_tenant_id=str(body["tenant_id"]),
@@ -181,7 +215,7 @@ def import_tenant_onboarding(
             native_tenant_id=native_tenant_id,
             state="verified",
             routing={"routing_key": routing_key, "proof_type": "trusted_provisioning_contract",
-                     "proof_reference": user.request_id, "provisioning": provisioned},
+                     "proof_reference": request_id, "provisioning": provisioned},
             verified=True,
         )
         automation_store.upsert_native_tenant_inventory(
@@ -198,9 +232,32 @@ def import_tenant_onboarding(
         )
 
     for module_name in sorted(enabled_modules - {"srms", "eappraisal"}):
-        module_results[module_name] = {"status": "pending", "detail": "native tenant provisioning contract not yet available"}
+        module_results[module_name] = {
+            "status": "pending",
+            "detail": "native tenant provisioning contract not yet available",
+            "notification": {
+                "owner": module_name,
+                "status": "not_started",
+                "detail": "Notification will remain in the module's native workflow when provisioning is available.",
+            },
+        }
     refresh_tenant_mapping_cache()
-    return {"imported": True, "result": registry_payload, "modules": module_results}
+    ready_count = sum(1 for value in module_results.values() if value.get("status") not in {"failed", "pending"})
+    failed_count = sum(1 for value in module_results.values() if value.get("status") == "failed")
+    return {
+        "imported": True,
+        "tenant_id": str(body["tenant_id"]),
+        "result": registry_payload,
+        "modules": module_results,
+        "orchestration": {
+            "status": "completed" if failed_count == 0 else "completed_with_errors",
+            "requested_modules": len(enabled_modules),
+            "ready_modules": ready_count,
+            "failed_modules": failed_count,
+            "notification_policy": "native_module_owned",
+            "next_step": "Run employee sign-in account setup after native employee records are ready.",
+        },
+    }
 
 
 @router.get("")
@@ -281,7 +338,13 @@ def update_branding(
     branding = upsert_tenant_branding(
         tenant_id,
         brand_name=payload.brand_name,
+        short_name=payload.short_name,
         support_email=payload.support_email,
+        support_phone=payload.support_phone,
+        website=payload.website,
+        locale=payload.locale,
+        timezone=payload.timezone,
+        date_format=payload.date_format,
         theme=payload.theme,
     )
     return {"tenant_id": tenant_id, "branding": branding, "updated": True}

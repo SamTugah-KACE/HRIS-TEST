@@ -1,0 +1,9 @@
+FROM quay.io/keycloak/keycloak:26.3.3
+
+COPY realm-export.json /opt/keycloak/data/import/hris-platform-realm.json
+COPY themes/hris-platform /opt/keycloak/themes/hris-platform
+
+EXPOSE 10000
+
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start", "--import-realm", "--http-enabled=true", "--http-port=10000", "--proxy-headers=xforwarded", "--hostname-strict=false", "--health-enabled=true"]

@@ -1,0 +1,217 @@
+# Render free-tier integration-test stack. This is intentionally not a
+# production topology: free services sleep and free Postgres expires.
+databases:
+  - name: gi-kace-hris-test-db
+    plan: free
+    databaseName: hris_test
+    user: hris_test
+    ipAllowList: []
+
+services:
+  - type: web
+    name: gi-kace-hris-keycloak-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./identity/Dockerfile.render
+    dockerContext: ./identity
+    healthCheckPath: /realms/hris-platform/.well-known/openid-configuration
+    envVars:
+      - key: KC_DB
+        value: postgres
+      - key: KC_DB_URL_HOST
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: host
+      - key: KC_DB_URL_PORT
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: port
+      - key: KC_DB_URL_DATABASE
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: database
+      - key: KC_DB_USERNAME
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: user
+      - key: KC_DB_PASSWORD
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: password
+      - key: KC_BOOTSTRAP_ADMIN_USERNAME
+        value: render-bootstrap-admin
+      - key: KC_BOOTSTRAP_ADMIN_PASSWORD
+        generateValue: true
+      - key: KC_PROXY_HEADERS
+        value: xforwarded
+      - key: KC_HOSTNAME_STRICT
+        value: "false"
+      - key: JAVA_OPTS_KC_HEAP
+        value: -XX:InitialRAMPercentage=25 -XX:MaxRAMPercentage=60
+
+  - type: web
+    name: gi-kace-hris-tenant-registry-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/backend/tenant-registry-service/Dockerfile
+    dockerContext: ./apps/backend/tenant-registry-service
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: connectionString
+      - key: DB_AUTO_CREATE_ON_STARTUP
+        value: "true"
+      - key: STARTUP_INIT_RETRIES
+        value: "60"
+      - key: STARTUP_INIT_RETRY_DELAY_SECONDS
+        value: "5"
+      - key: INTERNAL_BASIC_AUTH_USERNAME
+        value: hris-core
+      - key: INTERNAL_BASIC_AUTH_PASSWORD
+        generateValue: true
+
+  - type: web
+    name: gi-kace-hris-core-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/backend/hris-core-api/Dockerfile
+    dockerContext: ./apps/backend/hris-core-api
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: HRIS_DATA_SOURCE_MODE
+        value: production
+      - key: HRIS_DEPLOYMENT_MODE
+        value: single
+      - key: HRIS_ALLOW_SINGLE_NODE_PRODUCTION
+        value: "true"
+      - key: AUTH_MODE
+        value: keycloak
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+      - key: AUTH_COOKIE_SAMESITE
+        value: none
+      - key: AUTH_CSRF_ENABLED
+        value: "true"
+      - key: AUTH_STATE_SECRET
+        generateValue: true
+      - key: AUTH_SESSION_ENCRYPTION_KEY
+        generateValue: true
+      - key: AUTOMATION_STORE_DATABASE_URL
+        fromDatabase:
+          name: gi-kace-hris-test-db
+          property: connectionString
+      - key: DB_AUTO_CREATE_ON_STARTUP
+        value: "true"
+      - key: AUTOMATION_STORE_SCHEMA
+        value: hris_automation
+      - key: TENANT_REGISTRY_BASE_URL
+        value: https://gi-kace-hris-tenant-registry-test.onrender.com
+      - key: TENANT_REGISTRY_BASIC_AUTH_USERNAME
+        value: hris-core
+      - key: TENANT_REGISTRY_BASIC_AUTH_PASSWORD
+        fromService:
+          name: gi-kace-hris-tenant-registry-test
+          type: web
+          envVarKey: INTERNAL_BASIC_AUTH_PASSWORD
+      - key: TENANT_REGISTRY_ALLOW_FALLBACK
+        value: "false"
+      - key: TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN
+        value: "false"
+      - key: KEYCLOAK_ISSUER
+        value: https://gi-kace-hris-keycloak-test.onrender.com/realms/hris-platform
+      - key: KEYCLOAK_JWKS_URL
+        value: https://gi-kace-hris-keycloak-test.onrender.com/realms/hris-platform/protocol/openid-connect/certs
+      - key: KEYCLOAK_AUTHORIZE_URL
+        value: https://gi-kace-hris-keycloak-test.onrender.com/realms/hris-platform/protocol/openid-connect/auth
+      - key: KEYCLOAK_TOKEN_URL
+        value: https://gi-kace-hris-keycloak-test.onrender.com/realms/hris-platform/protocol/openid-connect/token
+      - key: KEYCLOAK_END_SESSION_URL
+        value: https://gi-kace-hris-keycloak-test.onrender.com/realms/hris-platform/protocol/openid-connect/logout
+      - key: KEYCLOAK_AUDIENCE_HRIS_CORE
+        value: hris-core-api
+      - key: KEYCLOAK_CLIENT_ID_PORTAL
+        value: hris-portal
+      - key: KEYCLOAK_REALM
+        value: hris-platform
+      - key: KEYCLOAK_ADMIN_USERNAME
+        value: render-bootstrap-admin
+      - key: KEYCLOAK_ADMIN_PASSWORD
+        fromService:
+          name: gi-kace-hris-keycloak-test
+          type: web
+          envVarKey: KC_BOOTSTRAP_ADMIN_PASSWORD
+      - key: KEYCLOAK_ADMIN_REALM
+        value: master
+      - key: KEYCLOAK_MANAGE_PORTAL_CLIENT_SETTINGS
+        value: "true"
+      - key: PORTAL_BASE_URL
+        value: https://gi-kace-hris-portal-test.onrender.com
+      - key: AUTH_SSO_CALLBACK_URL
+        value: https://gi-kace-hris-core-test.onrender.com/auth/sso/callback
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://gi-kace-hris-portal-test.onrender.com
+      - key: SRMS_BASE_URL
+        value: https://srms.gi-kace.com.gh
+      - key: EAPPRAISAL_INTEGRATION_BASE_URL
+        value: https://appraisal.gi-kace.com.gh
+      - key: SRMS_HRIS_SHARED_SECRET
+        sync: false
+      - key: SRMS_HRIS_SERVICE_TOKEN
+        sync: false
+      - key: EAPPRAISAL_HRIS_SHARED_SECRET
+        sync: false
+      - key: EAPPRAISAL_HRIS_SERVICE_TOKEN
+        sync: false
+      - key: MODULE_HANDOFF_ENABLED
+        value: "true"
+      - key: TENANT_FEDERATION_REQUIRE_SECOND_SUPERADMIN
+        value: "false"
+      - key: MODULE_SERVICE_AUTH_MODE
+        value: shared_secret
+      - key: ENABLE_STARTUP_TENANT_INVENTORY_IMPORT
+        value: "false"
+      - key: ENABLE_STARTUP_EAPPRAISAL_TENANT_INVENTORY_IMPORT
+        value: "false"
+      - key: ENABLE_FEDERATED_KEYCLOAK_SYNC
+        value: "false"
+      - key: STARTUP_FEDERATED_ENROLLMENT_MODE
+        value: disabled
+      - key: ENABLE_AUTO_PROVISION
+        value: "false"
+      - key: USE_STUB_DATA
+        value: "false"
+      - key: HRIS_COMPONENT_PRIMARY_DATABASE_MODE
+        value: required
+      - key: HRIS_COMPONENT_TENANT_REGISTRY_MODE
+        value: required
+      - key: HRIS_COMPONENT_KEYCLOAK_MODE
+        value: required
+      - key: HRIS_COMPONENT_AUDIT_LOG_MODE
+        value: required
+      - key: HRIS_COMPONENT_SRMS_MODE
+        value: optional
+      - key: HRIS_COMPONENT_EAPPRAISAL_MODE
+        value: optional
+      - key: BOOTSTRAP_ADMIN_ENABLED
+        value: "false"
+
+  - type: web
+    name: gi-kace-hris-portal-test
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/frontend/portal/Dockerfile
+    dockerContext: ./apps/frontend/portal
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "80"
+      - key: VITE_HRIS_CORE_API_BASE_URL
+        value: https://gi-kace-hris-core-test.onrender.com
+      - key: VITE_AUTH_MODE
+        value: keycloak

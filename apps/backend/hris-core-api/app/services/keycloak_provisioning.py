@@ -150,6 +150,42 @@ def _normalized_roles(default_role: str, roles: Optional[List[str]]) -> List[str
     return filtered or ["hris:employee"]
 
 
+def set_user_enabled_by_username(*, username: str, enabled: bool) -> Dict[str, Optional[str]]:
+    """Set the Keycloak account state without changing roles, password, or attributes."""
+    settings = get_settings()
+    if not settings.keycloak_issuer:
+        return {"status": "skipped", "reason": "keycloak_not_configured", "user_id": None}
+    base = _admin_base_url()
+    realm = _target_realm_from_issuer()
+    target_username = str(username or "").strip().lower()
+    if not base or not realm or not target_username:
+        return {"status": "skipped", "reason": "keycloak_admin_resolution_failed", "user_id": None}
+
+    users_url = f"{base}/admin/realms/{realm}/users"
+    with httpx.Client(timeout=settings.http_client_timeout_seconds) as client:
+        token = _admin_access_token(client)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        response = client.get(users_url, headers=headers, params={"username": target_username, "exact": "true"})
+        response.raise_for_status()
+        rows = response.json() if isinstance(response.json(), list) else []
+        user = next((row for row in rows if str(row.get("username") or "").lower() == target_username), None)
+        if not user:
+            return {"status": "not_found", "reason": None, "user_id": None}
+        user_id = str(user.get("id") or "").strip()
+        if not user_id:
+            return {"status": "not_found", "reason": "missing_user_id", "user_id": None}
+        current = bool(user.get("enabled", True))
+        if current == bool(enabled):
+            return {"status": "unchanged", "reason": None, "user_id": user_id}
+        update = client.put(f"{users_url}/{user_id}", headers=headers, json={"enabled": bool(enabled)})
+        update.raise_for_status()
+        return {
+            "status": "enabled" if enabled else "disabled",
+            "reason": None,
+            "user_id": user_id,
+        }
+
+
 def _should_issue_temp_password(
     *,
     send_temp_password: bool,

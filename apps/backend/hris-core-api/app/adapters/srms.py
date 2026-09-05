@@ -1284,9 +1284,40 @@ class HttpSrmsAdapter(SrmsAdapter):
             if last_exception is not None:
                 raise last_exception
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="SRMS tenant provisioning returned no payload")
-        envelope = ensure_dict(response_payload)
-        data = ensure_dict(envelope.get("data")) or envelope
+        envelope = ensure_dict(response_payload, context="SRMS tenant provisioning response")
+        data = ensure_dict(envelope.get("data"), context="SRMS tenant provisioning response.data") or envelope
         return data
+
+    def activate_tenant_federation(self, native_tenant_id: str, canonical_tenant_id: str) -> Dict[str, Any]:
+        if not self.settings.srms_base_url:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SRMS base URL is not configured")
+        path = f"/api/hris/v1/integration/tenants/{native_tenant_id}/federation/activate"
+        last_exception: Optional[HTTPException] = None
+        with self._get_http_client() as client:
+            session_token = self._session_token_from_config_or_cache() or self._refresh_runtime_session_token(client)
+            for headers in self._integration_header_candidates(None):
+                headers["Content-Type"] = "application/json"
+                if session_token:
+                    headers["X-Session-Token"] = session_token
+                try:
+                    payload, _ = get_json_from_candidate_paths(
+                        client=client, base_url=str(self.settings.srms_base_url), paths=[path], headers=headers,
+                        method="POST", json_body={"canonical_tenant_id": canonical_tenant_id}, module_name="SRMS",
+                        payload_security_mode=self.settings.srms_payload_security_mode,
+                        payload_signing_secret=self.settings.srms_payload_signing_secret,
+                        payload_encryption_secret=self.settings.srms_payload_encryption_secret,
+                        payload_session_token=session_token,
+                        prepare_headers=lambda candidate, base_headers: self._build_signed_headers_for_path(
+                            path=candidate, session_token=session_token, method="POST", base_headers=base_headers,
+                        ),
+                    )
+                    envelope = ensure_dict(payload, context="SRMS federation activation response")
+                    return ensure_dict(envelope.get("data"), context="SRMS federation activation response.data") or envelope
+                except HTTPException as exc:
+                    last_exception = exc
+        if last_exception:
+            raise last_exception
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="SRMS federation activation returned no payload")
 
     def list_tenant_users(
         self,

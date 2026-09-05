@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check, Rocket, AlertTriangle } from 'lucide-react';
+import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check, Rocket, AlertTriangle, Compass } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
   getTenantBranding,
@@ -9,9 +9,11 @@ import {
   getModuleReadinessSnapshot,
   getJitAuditSnapshot,
   listNativeTenantInventory,
+  refreshNativeTenantInventory,
   createTenantLinkClaim,
   confirmTenantLinkClaim,
   approveTenantLinkClaim,
+  retryTenantLinkCompletion,
   listTenantLinkClaims,
   listTenants,
   runFederatedKeycloakSync,
@@ -24,17 +26,20 @@ import {
   type ModuleReadinessSnapshotResponse,
   type JitAuditSnapshotResponse,
   type NativeTenantInventoryRow,
+  type NativeTenantRefreshResult,
   type TenantLinkClaim,
+  type TenantOnboardingImportResponse,
 } from '../../api/hrisCoreClient';
 import { useAuth } from '../../auth/AuthProvider';
 import { HRIS_ROLES } from '../../auth/roles';
+import { getModuleOrigin } from '../../constants/moduleOrigins';
 
 export const TenantManagementPage: React.FC = () => {
   const { user } = useAuth();
   const isSuperAdmin = user?.effectiveRole === HRIS_ROLES.SUPER_ADMIN;
   const [onboardBusy, setOnboardBusy] = useState(false);
   const [onboardError, setOnboardError] = useState('');
-  const [onboardResult, setOnboardResult] = useState<unknown>(null);
+  const [onboardResult, setOnboardResult] = useState<TenantOnboardingImportResponse | null>(null);
   const [onboardPayload, setOnboardPayload] = useState({
     tenant_id: '',
     code: '',
@@ -85,15 +90,18 @@ export const TenantManagementPage: React.FC = () => {
   const [jitAuditError, setJitAuditError] = useState('');
   const [jitAuditResult, setJitAuditResult] = useState<JitAuditSnapshotResponse | null>(null);
   const [nativeInventory, setNativeInventory] = useState<NativeTenantInventoryRow[]>([]);
+  const [inventoryRefreshBusy, setInventoryRefreshBusy] = useState(false);
+  const [inventoryRefreshResults, setInventoryRefreshResults] = useState<NativeTenantRefreshResult[]>([]);
   const [claimModule, setClaimModule] = useState('eappraisal');
   const [claimNativeTenantId, setClaimNativeTenantId] = useState('');
-  const [claimReason, setClaimReason] = useState('Verified customer request to federate the native tenant');
+  const [claimReason, setClaimReason] = useState('Verified customer request to connect this organization');
   const [activeClaim, setActiveClaim] = useState<TenantLinkClaim | null>(null);
   const [claimChallenge, setClaimChallenge] = useState('');
   const [claimAssertion, setClaimAssertion] = useState('');
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimError, setClaimError] = useState('');
   const [openClaims, setOpenClaims] = useState<TenantLinkClaim[]>([]);
+  const [showGuide, setShowGuide] = useState(true);
 
   const selectedTenant = useMemo(
     () => tenants.find((t) => t.tenant_id === selectedTenantId) || null,
@@ -115,6 +123,55 @@ export const TenantManagementPage: React.FC = () => {
     (!onboardPayload.enabled_modules.includes('srms') || onboardPayload.phone_number.trim()) &&
     !onboardBusy
   );
+
+  const nativeConfirmationUrl = useMemo(() => {
+    if (!activeClaim || !claimChallenge) return '';
+    const origin = getModuleOrigin(activeClaim.module_name).replace(/\/$/, '');
+    if (!origin) return '';
+    const inventory = nativeInventory.find((row) => row.native_tenant_id === activeClaim.native_tenant_id);
+    const route = activeClaim.module_name === 'srms'
+      ? `/${encodeURIComponent(String(inventory?.routing_key || '').trim())}/federation/confirm`
+      : '/admin/federation/confirm';
+    if (activeClaim.module_name === 'srms' && !inventory?.routing_key) return '';
+    const params = new URLSearchParams({
+      claim_id: activeClaim.claim_id,
+      canonical_tenant_id: activeClaim.canonical_tenant_id,
+      native_tenant_id: activeClaim.native_tenant_id,
+      challenge: claimChallenge,
+      return_origin: window.location.origin,
+    });
+    // Keep the one-use challenge in the fragment so proxies and web-server logs do not receive it.
+    return `${origin}${route}#${params.toString()}`;
+  }, [activeClaim, claimChallenge, nativeInventory]);
+
+  useEffect(() => {
+    const receiveNativeAssertion = async (event: MessageEvent) => {
+      if (!activeClaim || event.origin !== getModuleOrigin(activeClaim.module_name).replace(/\/$/, '')) return;
+      const payload = event.data as { type?: string; claim_id?: string; assertion?: string } | null;
+      if (payload?.type !== 'HRIS_TENANT_FEDERATION_ASSERTION' || payload.claim_id !== activeClaim.claim_id) return;
+      if (typeof payload.assertion === 'string' && payload.assertion.length >= 64) {
+        setClaimAssertion(payload.assertion);
+        setClaimError('');
+        setClaimBusy(true);
+        try {
+          const confirmed = await confirmTenantLinkClaim(activeClaim.claim_id, payload.assertion);
+          setActiveClaim(confirmed.claim);
+          setOpenClaims((claims) => claims.map((claim) => claim.claim_id === confirmed.claim.claim_id ? confirmed.claim : claim));
+          await approveTenantLinkClaim(activeClaim.claim_id, claimReason);
+          setOpenClaims((claims) => claims.filter((claim) => claim.claim_id !== activeClaim.claim_id));
+          setActiveClaim(null); setClaimChallenge(''); setClaimAssertion('');
+          setMessage('The native organization was confirmed and connected successfully.');
+        } catch (error: any) {
+          const refreshed = await listTenantLinkClaims().catch(() => []);
+          const current = refreshed.find((claim) => claim.claim_id === activeClaim.claim_id);
+          if (current) setActiveClaim(current);
+          setClaimError(error.response?.data?.detail || 'The native response was received, but HRIS could not complete the connection.');
+        } finally { setClaimBusy(false); }
+      }
+    };
+    window.addEventListener('message', receiveNativeAssertion);
+    return () => window.removeEventListener('message', receiveNativeAssertion);
+  }, [activeClaim, claimReason]);
 
   useEffect(() => {
     let mounted = true;
@@ -144,10 +201,10 @@ export const TenantManagementPage: React.FC = () => {
     Promise.all([listNativeTenantInventory(claimModule), listTenantLinkClaims()])
       .then(([rows, claims]) => {
         setNativeInventory(rows);
-        setOpenClaims(claims.filter((claim) => ['verification_pending', 'native_confirmed'].includes(claim.state)));
+        setOpenClaims(claims.filter((claim) => ['verification_pending', 'native_confirmed', 'approved'].includes(claim.state)));
         setClaimNativeTenantId((current) => current || rows.find((row) => row.inventory_status !== 'claimed')?.native_tenant_id || '');
       })
-      .catch(() => setClaimError('Unable to load native tenant inventory.'));
+      .catch(() => setClaimError('Could not load organizations from the connected HR systems.'));
   }, [claimModule, isSuperAdmin]);
 
   const beginTenantClaim = async () => {
@@ -162,8 +219,25 @@ export const TenantManagementPage: React.FC = () => {
       setOpenClaims((claims) => [result.claim, ...claims.filter((claim) => claim.claim_id !== result.claim.claim_id)]);
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
-      setClaimError(e.response?.data?.detail || 'Could not create tenant claim.');
+      setClaimError(e.response?.data?.detail || 'Could not start the organization confirmation request.');
     } finally { setClaimBusy(false); }
+  };
+
+  const refreshNativeInventory = async () => {
+    setInventoryRefreshBusy(true);
+    setClaimError('');
+    try {
+      const response = await refreshNativeTenantInventory(['srms', 'eappraisal'], 500);
+      setInventoryRefreshResults(response.results || []);
+      const rows = (response.items || []).filter((row) => row.module_name === claimModule);
+      setNativeInventory(rows);
+      setClaimNativeTenantId(rows.find((row) => row.inventory_status !== 'claimed')?.native_tenant_id || '');
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setClaimError(e.response?.data?.detail || 'Could not check connected HR systems. Please try again.');
+    } finally {
+      setInventoryRefreshBusy(false);
+    }
   };
 
   const confirmTenantClaim = async () => {
@@ -189,7 +263,22 @@ export const TenantManagementPage: React.FC = () => {
       setClaimChallenge(''); setClaimAssertion('');
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
-      setClaimError(e.response?.data?.detail || 'A different superadmin must approve the confirmed claim.');
+      const refreshed = await listTenantLinkClaims().catch(() => []);
+      const current = refreshed.find((claim) => claim.claim_id === activeClaim.claim_id);
+      if (current) setActiveClaim(current);
+      setClaimError(e.response?.data?.detail || 'The confirmed federation could not be approved.');
+    } finally { setClaimBusy(false); }
+  };
+
+  const retryTenantClaimCompletion = async () => {
+    if (!activeClaim) return;
+    setClaimBusy(true); setClaimError('');
+    try {
+      await retryTenantLinkCompletion(activeClaim.claim_id);
+      setOpenClaims((claims) => claims.filter((claim) => claim.claim_id !== activeClaim.claim_id));
+      setActiveClaim(null); setClaimChallenge(''); setClaimAssertion('');
+    } catch (error: any) {
+      setClaimError(error.response?.data?.detail || 'Federation completion still failed. Check module readiness and retry.');
     } finally { setClaimBusy(false); }
   };
 
@@ -212,7 +301,7 @@ export const TenantManagementPage: React.FC = () => {
       const refreshed = await listTenants(500);
       setTenants(refreshed.tenants || []);
     } catch {
-      setOnboardError('Failed to import tenant. Check Core API logs and Tenant Registry credentials.');
+      setOnboardError('The organization could not be set up. Ask a system administrator to check the connection logs.');
     } finally {
       setOnboardBusy(false);
     }
@@ -283,7 +372,7 @@ export const TenantManagementPage: React.FC = () => {
     }
   };
 
-  const onUploadLogo = async (kind: 'primary' | 'symbol' | 'favicon', file: File | null) => {
+  const onUploadLogo = async (kind: 'primary' | 'symbol' | 'favicon' | 'login_background', file: File | null) => {
     if (!selectedTenantId || !file) return;
     setSaving(true);
     setMessage('');
@@ -376,8 +465,8 @@ export const TenantManagementPage: React.FC = () => {
       setFederatedResult(payload);
       setMessage(
         federatedDryRun
-          ? 'Federated Keycloak dry-run completed.'
-          : 'Federated Keycloak sync completed.'
+          ? 'Account-change preview completed.'
+          : 'Employee sign-in accounts were updated.'
       );
       if (!federatedDryRun) {
         setFederatedApplyConfirmation('');
@@ -394,7 +483,7 @@ export const TenantManagementPage: React.FC = () => {
         maybeAxios?.message ||
         'Unknown error';
       setFederatedError(
-        `Failed to run federated Keycloak sync (${status ?? 'no-status'}): ${detail}`
+        `Could not prepare employee sign-in accounts (${status ?? 'no status'}): ${detail}`
       );
     } finally {
       setFederatedBusy(false);
@@ -415,7 +504,7 @@ export const TenantManagementPage: React.FC = () => {
       setReadinessResult(payload);
     } catch (err: unknown) {
       const maybeAxios = err as { response?: { data?: { detail?: string } }; message?: string };
-      setReadinessError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Failed to load module readiness snapshot');
+      setReadinessError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Could not check the connected HR services.');
     } finally {
       setReadinessBusy(false);
     }
@@ -434,42 +523,96 @@ export const TenantManagementPage: React.FC = () => {
       setJitAuditResult(payload);
     } catch (err: unknown) {
       const maybeAxios = err as { response?: { data?: { detail?: string } }; message?: string };
-      setJitAuditError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Failed to load JIT audit history');
+      setJitAuditError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Could not load the automatic setup history.');
     } finally {
       setJitAuditBusy(false);
     }
   };
 
   if (loading) {
-    return <div className="text-sm text-gray-500">Loading tenant configuration...</div>;
+    return <div className="text-sm text-gray-500">Loading organization settings...</div>;
   }
 
   return (
     <div className="space-y-6">
       {isSuperAdmin && (
+        <section className="overflow-hidden rounded-xl border border-brand-200 bg-gradient-to-r from-brand-50 to-white" aria-labelledby="tenant-guide-title">
+          <div className="flex items-start justify-between gap-4 p-5">
+            <div className="flex gap-3">
+              <div className="rounded-lg bg-brand-600 p-2 text-white"><Compass className="h-5 w-5" /></div>
+              <div>
+                <h1 id="tenant-guide-title" className="font-semibold text-gray-900">Organization setup guide</h1>
+                <p className="mt-1 text-sm text-gray-600">Follow these steps in order. “Federation” means securely connecting an organization and its existing users across HRIS, Staff Records, and Appraisal without merging organizations by name.</p>
+              </div>
+            </div>
+            <button type="button" className="text-sm font-medium text-brand-700" onClick={() => setShowGuide((value) => !value)} aria-expanded={showGuide}>
+              {showGuide ? 'Hide guide' : 'Show guide'}
+            </button>
+          </div>
+          {showGuide && (
+            <ol className="grid border-t border-brand-100 bg-white/70 md:grid-cols-4">
+              {[
+                ['1', 'Choose the path', 'New customer: create it below. Existing customer: find it in connected systems.'],
+                ['2', 'Connect services', 'Select Staff Records, Appraisal, and other services the organization is entitled to use.'],
+                ['3', 'Verify the link', 'For existing data, complete native-system confirmation and independent administrator approval.'],
+                ['4', 'Preview, then activate', 'Run employee sign-in setup as a dry run, review readiness, then apply and test one user.'],
+              ].map(([number, title, detail]) => (
+                <li key={number} className="border-brand-100 p-4 md:border-r last:border-r-0">
+                  <div className="mb-2 flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand-100 text-xs font-bold text-brand-700">{number}</span><span className="text-sm font-semibold text-gray-900">{title}</span></div>
+                  <p className="text-xs leading-5 text-gray-600">{detail}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </section>
+      )}
+      {isSuperAdmin && (
         <div className="card space-y-4">
           <div>
-            <h2 className="text-sm font-semibold text-gray-900">Legacy native tenant claim</h2>
+            <h2 className="text-sm font-semibold text-gray-900">Connect an existing organization</h2>
             <p className="mt-1 text-xs text-gray-500">
-              Names are discovery hints only. Select the exact native ID, obtain a signed assertion from an authority in that native tenant, then have a different HRIS superadmin approve it.
+              Use this when an organization already exists in Staff Records or Performance Appraisal. For safety, the organization must confirm the request and another system administrator must approve it.
             </p>
           </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" className="btn-secondary" disabled={inventoryRefreshBusy} onClick={refreshNativeInventory}>
+              {inventoryRefreshBusy ? 'Checking connected systems…' : 'Find organizations in connected systems'}
+            </button>
+            <span className="text-xs text-gray-500" title="Names can be duplicated or changed, so HRIS uses protected system identifiers and administrator approval.">Organizations are never joined by name alone.</span>
+          </div>
+          {inventoryRefreshResults.length > 0 && (
+            <div className="grid gap-2 md:grid-cols-2">
+              {inventoryRefreshResults.map((row) => (
+                <div key={row.module} className={clsx('rounded border p-2 text-xs', row.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800')}>
+                  <span className="font-semibold">{row.module}</span>: {row.ok
+                    ? `${row.result?.scanned ?? 0} found, ${row.result?.native_inventory_upserted ?? 0} recorded`
+                    : row.error === 'integration_authentication_rejected'
+                      ? 'is online but did not accept the secure HRIS connection'
+                      : row.error === 'integration_not_configured'
+                        ? 'has not been connected to HRIS yet'
+                        : 'could not be reached; try again or ask a system administrator'}
+                </div>
+              ))}
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-2">
             <select className="input-field" value={claimModule} onChange={(e) => { setClaimModule(e.target.value); setClaimNativeTenantId(''); }}>
               <option value="srms">Staff Records</option><option value="eappraisal">Performance Appraisal</option>
             </select>
             <select className="input-field" value={claimNativeTenantId} onChange={(e) => setClaimNativeTenantId(e.target.value)}>
-              <option value="">Select an unclaimed native tenant</option>
-              {nativeInventory.map((row) => <option key={`${row.module_name}:${row.native_tenant_id}`} value={row.native_tenant_id}>{row.display_name} — {row.native_tenant_id} ({row.inventory_status})</option>)}
+              <option value="">Choose an organization that is not connected</option>
+              {nativeInventory.map((row) => <option key={`${row.module_name}:${row.native_tenant_id}`} value={row.native_tenant_id}>{row.display_name} — {row.inventory_status === 'claimed' ? 'Connected' : 'Needs review'}</option>)}
             </select>
           </div>
           <textarea className="input-field min-h-20" value={claimReason} onChange={(e) => setClaimReason(e.target.value)} aria-label="Claim reason" />
-          <button type="button" className="btn-primary" disabled={claimBusy || !selectedTenantId || !claimNativeTenantId} onClick={beginTenantClaim}>Create verification challenge</button>
-          {openClaims.length > 0 && <div className="space-y-2"><div className="text-xs font-medium">Open claims (select one to continue or approve)</div>{openClaims.map((claim) => <button type="button" className="block w-full rounded border border-gray-200 p-2 text-left text-xs" key={claim.claim_id} onClick={() => { setActiveClaim(claim); setClaimChallenge(''); setClaimAssertion(''); }}><span className="font-mono">{claim.claim_id}</span> — {claim.module_name} — {claim.state}</button>)}</div>}
-          {activeClaim && <div className="rounded border border-gray-200 p-3 text-xs"><div>Claim: <span className="font-mono">{activeClaim.claim_id}</span></div><div>State: {activeClaim.state}</div></div>}
-          {claimChallenge && <div><label className="text-xs font-medium">One-time challenge (expires in five minutes)</label><textarea readOnly className="input-field mt-1 min-h-20 font-mono text-xs" value={claimChallenge} /></div>}
-          {activeClaim?.state === 'verification_pending' && <div className="space-y-2"><label className="text-xs font-medium">Signed assertion returned by the native tenant authority</label><textarea className="input-field min-h-24 font-mono text-xs" value={claimAssertion} onChange={(e) => setClaimAssertion(e.target.value)} /><button type="button" className="btn-secondary" disabled={claimBusy || !claimAssertion.trim()} onClick={confirmTenantClaim}>Verify native assertion</button></div>}
-          {activeClaim?.state === 'native_confirmed' && <button type="button" className="btn-primary" disabled={claimBusy} onClick={approveTenantClaim}>Approve as second superadmin</button>}
+          <button type="button" className="btn-primary" title="Creates a five-minute confirmation request for the selected organization." disabled={claimBusy || !selectedTenantId || !claimNativeTenantId} onClick={beginTenantClaim}>Start secure confirmation</button>
+          {openClaims.length > 0 && <div className="space-y-2"><div className="text-xs font-medium">Requests waiting for confirmation, approval, or recovery</div>{openClaims.map((claim) => <button type="button" className="block w-full rounded border border-gray-200 p-2 text-left text-xs" key={claim.claim_id} onClick={() => { setActiveClaim(claim); setClaimChallenge(''); setClaimAssertion(''); }}><span className="font-mono">{claim.claim_id}</span> — {claim.module_name === 'srms' ? 'Staff Records' : 'Performance Appraisal'} — {claim.state === 'verification_pending' ? 'Waiting for native confirmation' : claim.state === 'native_confirmed' ? 'Ready for HRIS approval' : 'Approved; verify or retry completion'}</button>)}</div>}
+          {activeClaim && <div className="rounded border border-gray-200 p-3 text-xs"><div>Request number: <span className="font-mono">{activeClaim.claim_id}</span></div><div>Current status: {activeClaim.state === 'verification_pending' ? 'Waiting for native confirmation' : activeClaim.state === 'native_confirmed' ? 'Ready for HRIS approval' : 'Approved; completion can be retried safely'}</div></div>}
+          {claimChallenge && <div><label className="text-xs font-medium">Confirmation message (valid for five minutes)</label><textarea readOnly className="input-field mt-1 min-h-20 font-mono text-xs" value={claimChallenge} /></div>}
+          {nativeConfirmationUrl && activeClaim?.state === 'verification_pending' && <div className="rounded border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900"><p className="mb-2">Open the connected system and ask an authorized native administrator to review this exact organization link. The signed response returns to this page automatically.</p><div className="flex flex-wrap gap-2"><button type="button" className="btn-primary" onClick={() => window.open(nativeConfirmationUrl, 'hris-native-federation', 'popup,width=720,height=760')}>Open native confirmation</button><button type="button" className="btn-secondary" onClick={async () => { await navigator.clipboard.writeText(nativeConfirmationUrl); setMessage('Secure native confirmation link copied. It expires with this five-minute request.'); }}><Copy className="mr-1 inline h-3.5 w-3.5" />Copy secure link</button></div></div>}
+          {activeClaim?.state === 'verification_pending' && <div className="space-y-2"><label className="text-xs font-medium">Paste the signed confirmation returned by the connected system</label><textarea className="input-field min-h-24 font-mono text-xs" value={claimAssertion} onChange={(e) => setClaimAssertion(e.target.value)} /><button type="button" className="btn-secondary" disabled={claimBusy || !claimAssertion.trim()} onClick={confirmTenantClaim}>Check confirmation</button></div>}
+          {activeClaim?.state === 'native_confirmed' && <button type="button" className="btn-primary" disabled={claimBusy} onClick={approveTenantClaim}>Approve confirmed federation</button>}
+          {activeClaim?.state === 'approved' && <button type="button" className="btn-primary" disabled={claimBusy} onClick={retryTenantClaimCompletion}>Retry federation completion</button>}
           {claimError && <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">{String(claimError)}</div>}
         </div>
       )}
@@ -477,9 +620,9 @@ export const TenantManagementPage: React.FC = () => {
         <div className="card">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Tenant onboarding and module federation</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Add or connect an organization</h2>
               <p className="mt-1 text-xs text-gray-500">
-                Creates a canonical tenant or provisions missing native modules for the explicitly selected tenant.
+                Create a new organization in HRIS, or set up missing HR services for an organization you selected.
               </p>
             </div>
             <span className="inline-flex items-center gap-2 rounded-lg bg-brand-500/10 px-3 py-2 text-xs font-medium text-brand-600">
@@ -500,7 +643,7 @@ export const TenantManagementPage: React.FC = () => {
                   is_active: selectedTenant.is_active,
                 }))}
               >
-                Federate selected tenant by canonical ID
+                Use the selected organization
               </button>
             )}
             <div className="grid gap-3 md:grid-cols-2">
@@ -584,7 +727,7 @@ export const TenantManagementPage: React.FC = () => {
                 </select>
               </label>
               <fieldset className="space-y-2 md:col-span-2">
-                <legend className="text-xs font-medium text-gray-600">Modules to provision</legend>
+                <legend className="text-xs font-medium text-gray-600">HR services to set up</legend>
                 <div className="flex flex-wrap gap-4">
                   {[
                     ['srms', 'Staff Records'],
@@ -606,12 +749,12 @@ export const TenantManagementPage: React.FC = () => {
                     </label>
                   ))}
                 </div>
-                <p className="text-xs text-gray-500">HRIS generates canonical and native routing identifiers; names and codes are never used to match tenants.</p>
+                <p className="text-xs text-gray-500" title="Protected identifiers prevent two organizations with similar names from being joined accidentally.">HRIS uses protected identifiers and approval checks to keep organizations separate.</p>
               </fieldset>
             </div>
 
             <button className={clsx('btn-primary', onboardBusy && 'opacity-70')} disabled={!canSubmitOnboarding} type="submit">
-              {onboardBusy ? 'Provisioning…' : onboardPayload.tenant_id ? 'Provision selected tenant' : 'Create and provision tenant'}
+              {onboardBusy ? 'Setting up…' : onboardPayload.tenant_id ? 'Set up selected organization' : 'Create and set up organization'}
             </button>
 
             {onboardError && (
@@ -619,10 +762,60 @@ export const TenantManagementPage: React.FC = () => {
                 <AlertTriangle className="mt-0.5 h-4 w-4" /> {onboardError}
               </div>
             )}
-            {onboardResult != null ? (
-              <pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
-                {JSON.stringify(onboardResult, null, 2) ?? ''}
-              </pre>
+            {onboardResult ? (
+              <div
+                className={clsx(
+                  'mt-3 space-y-3 rounded-lg border p-3 text-sm',
+                  onboardResult.orchestration.status === 'completed'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                    : 'border-amber-200 bg-amber-50 text-amber-900'
+                )}
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex items-start gap-2">
+                  {onboardResult.orchestration.status === 'completed' ? (
+                    <CheckCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  )}
+                  <div>
+                    <div className="font-semibold">
+                      {onboardResult.orchestration.status === 'completed'
+                        ? 'Organization setup completed'
+                        : 'Organization saved with connected-service errors'}
+                    </div>
+                    <div className="text-xs">
+                      {onboardResult.orchestration.ready_modules} of {onboardResult.orchestration.requested_modules} selected services are ready.
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {Object.entries(onboardResult.modules).map(([module, outcome]) => {
+                    const failed = outcome.status === 'failed' || outcome.status === 'pending';
+                    const moduleLabel = module === 'srms' ? 'Staff Records' : module === 'eappraisal' ? 'Performance Appraisal' : 'Leave Management';
+                    return (
+                      <div key={module} className="rounded-md border border-current/20 bg-white/70 p-3">
+                        <div className="flex items-center gap-2 font-medium">
+                          {failed ? <XCircle className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
+                          {moduleLabel}: {failed ? 'Needs attention' : outcome.created ? 'Created' : 'Already connected'}
+                        </div>
+                        {outcome.detail ? <p className="mt-1 text-xs">{outcome.detail}</p> : null}
+                        {outcome.notification ? (
+                          <p className="mt-1 text-xs">
+                            Email: {outcome.notification.status === 'handled_by_native_workflow'
+                              ? `handled by ${moduleLabel}`
+                              : outcome.notification.status === 'not_repeated'
+                                ? 'not resent for the existing organization'
+                                : 'not started'}.
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-xs">{onboardResult.orchestration.next_step}</p>
+              </div>
             ) : null}
           </form>
         </div>
@@ -631,9 +824,9 @@ export const TenantManagementPage: React.FC = () => {
         <div className="card">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Federated Keycloak Sync (email-only)</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Set up employee sign-in accounts</h2>
               <p className="mt-1 text-xs text-gray-500">
-                Uses federated inventory users with valid emails. No module provisioning is performed.
+                Finds employees with valid work email addresses and prepares their central HRIS sign-in accounts. It does not change Staff Records or appraisal data.
               </p>
             </div>
             <span className="inline-flex items-center gap-2 rounded-lg bg-brand-500/10 px-3 py-2 text-xs font-medium text-brand-600">
@@ -643,7 +836,7 @@ export const TenantManagementPage: React.FC = () => {
 
           <div className="grid gap-3 md:grid-cols-3">
             <label className="space-y-1">
-              <span className="text-xs font-medium text-gray-600">Scope tenant</span>
+              <span className="text-xs font-medium text-gray-600">Organization to process</span>
               <select
                 className="input-field"
                 value={selectedTenantId}
@@ -673,7 +866,7 @@ export const TenantManagementPage: React.FC = () => {
                 checked={federatedDryRun}
                 onChange={(e) => setFederatedDryRun(e.target.checked)}
               />
-              <span className="text-sm text-gray-700">Dry run (recommended)</span>
+              <span className="text-sm text-gray-700" title="Shows what would happen without creating or changing accounts.">Preview only (recommended)</span>
             </label>
             <label className="flex items-center gap-2 pt-0 md:pt-6">
               <input
@@ -681,7 +874,7 @@ export const TenantManagementPage: React.FC = () => {
                 checked={federatedGlobalScope}
                 onChange={(e) => setFederatedGlobalScope(e.target.checked)}
               />
-              <span className="text-sm text-gray-700">Global scope (all tenants)</span>
+              <span className="text-sm text-gray-700">Include all organizations</span>
             </label>
           </div>
 
@@ -709,7 +902,7 @@ export const TenantManagementPage: React.FC = () => {
               }
               onClick={onRunFederatedSync}
             >
-              {federatedBusy ? 'Running...' : federatedDryRun ? 'Run Dry-Run Sync' : 'Run Apply Sync'}
+              {federatedBusy ? 'Working…' : federatedDryRun ? 'Preview account changes' : 'Apply account changes'}
             </button>
           </div>
 
@@ -722,26 +915,26 @@ export const TenantManagementPage: React.FC = () => {
           {federatedResult ? (
             <div className="mt-4 space-y-3">
               <div className="grid gap-2 text-xs text-gray-700 md:grid-cols-3">
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">processed_users: {federatedResult.processed_users}</div>
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">created_count: {federatedResult.created_count}</div>
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">existing_count: {federatedResult.existing_count}</div>
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">failed_count: {federatedResult.failed_count}</div>
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">skipped_missing_email: {federatedResult.skipped_missing_email}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Employees checked: {federatedResult.processed_users}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Accounts to create: {federatedResult.created_count}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Accounts already present: {federatedResult.existing_count}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Could not be processed: {federatedResult.failed_count}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Skipped because email is missing: {federatedResult.skipped_missing_email}</div>
                 <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
-                  skipped_no_temporary_password: {federatedResult.skipped_no_temporary_password ?? 0}
+                  Skipped because a safe first password is unavailable: {federatedResult.skipped_no_temporary_password ?? 0}
                 </div>
-                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">dry_run: {String(federatedResult.dry_run)}</div>
+                <div className="rounded-md border border-gray-200 bg-gray-50 p-2">Preview only: {federatedResult.dry_run ? 'Yes' : 'No'}</div>
                 <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
-                  welcome_emails_sent: {federatedResult.welcome_emails_sent ?? 0}
+                  Welcome emails sent: {federatedResult.welcome_emails_sent ?? 0}
                 </div>
                 <div className="rounded-md border border-gray-200 bg-gray-50 p-2">
-                  welcome_emails_skipped: {federatedResult.welcome_emails_skipped ?? 0}
+                  Welcome emails not sent: {federatedResult.welcome_emails_skipped ?? 0}
                 </div>
               </div>
               {federatedResult.tenant_discovery?.length ? (
                 <div className="overflow-auto rounded-lg border border-gray-200">
                   <table className="w-full text-left text-xs">
-                    <thead className="bg-gray-50 text-gray-600"><tr><th className="px-3 py-2">Tenant</th><th className="px-3 py-2">Users</th><th className="px-3 py-2">Module inventory readiness</th></tr></thead>
+                    <thead className="bg-gray-50 text-gray-600"><tr><th className="px-3 py-2">Organization</th><th className="px-3 py-2">Employees</th><th className="px-3 py-2">Connected service status</th></tr></thead>
                     <tbody className="divide-y divide-gray-100 bg-white">
                       {federatedResult.tenant_discovery.map((row, idx) => (
                         <tr key={`${row.tenant.tenant_id || 'tenant'}-${idx}`}>
@@ -776,14 +969,14 @@ export const TenantManagementPage: React.FC = () => {
                 <table className="w-full text-left text-xs">
                   <thead className="sticky top-0 bg-gray-50 text-gray-600">
                     <tr>
-                      <th className="px-3 py-2 font-medium">Tenant</th>
+                      <th className="px-3 py-2 font-medium">Organization</th>
                       <th className="px-3 py-2 font-medium">Email</th>
                       <th className="px-3 py-2 font-medium">Status</th>
-                      <th className="px-3 py-2 font-medium">Keycloak ID</th>
+                      <th className="px-3 py-2 font-medium">Sign-in account ID</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
-                    {federatedResult.results.slice(0, 100).map((row, idx) => (
+                    {(federatedResult.results ?? []).slice(0, 100).map((row, idx) => (
                       <tr key={`${row.tenant_id}-${row.email}-${idx}`}>
                         <td className="px-3 py-2 font-mono text-[11px] text-gray-700">{row.tenant_id}</td>
                         <td className="px-3 py-2 text-gray-700">{row.email || '-'}</td>
@@ -815,9 +1008,9 @@ export const TenantManagementPage: React.FC = () => {
         <div className="card">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Module Readiness (tenant + user)</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Check connected HR services</h2>
               <p className="mt-1 text-xs text-gray-500">
-                Validates runtime readiness for SRMS, Appraisal, and eLeave with optional user identity hints.
+                Check whether Staff Records, Performance Appraisal and Leave Management are available for the selected organization or employee.
               </p>
             </div>
           </div>
@@ -826,7 +1019,7 @@ export const TenantManagementPage: React.FC = () => {
             <input className="input-field" placeholder="Username (optional)" value={readinessUsername} onChange={(e) => setReadinessUsername(e.target.value)} />
             <input className="input-field" placeholder="Employee ID (optional)" value={readinessEmployeeId} onChange={(e) => setReadinessEmployeeId(e.target.value)} />
             <button className="btn-primary" onClick={onRunModuleReadiness} disabled={readinessBusy || !selectedTenantId}>
-              {readinessBusy ? 'Checking...' : 'Check Readiness'}
+              {readinessBusy ? 'Checking…' : 'Check service availability'}
             </button>
           </div>
           {readinessError ? (
@@ -835,15 +1028,15 @@ export const TenantManagementPage: React.FC = () => {
           {readinessResult ? (
             <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs">
               <div className="mb-2 text-gray-700">
-                Tenant: <span className="font-mono">{readinessResult.tenant.tenant_id}</span> ({readinessResult.tenant.code})
+                Organization: <span className="font-mono">{readinessResult.tenant.tenant_id}</span> ({readinessResult.tenant.code})
               </div>
               <div className="space-y-2">
                 {Object.entries(readinessResult.modules || {}).map(([module, rs]) => (
                   <div key={module} className="rounded border border-gray-200 bg-white p-2">
                     <div className="font-semibold text-gray-800">{module}</div>
-                    <div className="text-gray-600">ready: {String(Boolean(rs.ready))}</div>
-                    <div className="text-gray-600">code: {String(rs.code || '')}</div>
-                    <div className="text-gray-600">detail: {String(rs.detail || '')}</div>
+                    <div className="text-gray-600">Available: {rs.ready ? 'Yes' : 'No'}</div>
+                    <div className="text-gray-600">Status: {String(rs.code || '')}</div>
+                    <div className="text-gray-600">Explanation: {String(rs.detail || '')}</div>
                   </div>
                 ))}
               </div>
@@ -855,9 +1048,9 @@ export const TenantManagementPage: React.FC = () => {
         <div className="card">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">JIT Audit & Cooldown</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Automatic setup history</h2>
               <p className="mt-1 text-xs text-gray-500">
-                View recent JIT setup outcomes, idempotency keys, and active cooldown state for the selected tenant.
+                Review recent automatic setup attempts and see when another attempt is allowed for the selected organization.
               </p>
             </div>
           </div>
@@ -870,7 +1063,7 @@ export const TenantManagementPage: React.FC = () => {
             />
             <div />
             <button className="btn-primary" onClick={onRunJitAudit} disabled={jitAuditBusy || !selectedTenantId}>
-              {jitAuditBusy ? 'Loading...' : 'Load JIT Audit'}
+              {jitAuditBusy ? 'Loading…' : 'View setup history'}
             </button>
           </div>
           {jitAuditError ? (
@@ -879,11 +1072,11 @@ export const TenantManagementPage: React.FC = () => {
           {jitAuditResult ? (
             <div className="mt-3 space-y-3">
               <div className="rounded-md border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
-                rows_count: {jitAuditResult.rows_count} | cooldown_settings: {jitAuditResult.cooldown_settings?.length || 0}
+                History entries: {jitAuditResult.rows_count} | Services waiting before another attempt: {jitAuditResult.cooldown_settings?.length || 0}
               </div>
               {jitAuditResult.tenant_links?.length ? (
                 <div className="rounded-md border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
-                  <div className="mb-1 font-semibold">Tenant link ledger</div>
+                  <div className="mb-1 font-semibold">Organization connection history</div>
                   <div className="space-y-1">
                     {jitAuditResult.tenant_links.map((link, idx) => (
                       <div key={`${link.target_module}-${idx}`} className="font-mono">
@@ -900,9 +1093,9 @@ export const TenantManagementPage: React.FC = () => {
                       <th className="px-3 py-2 font-medium">Time</th>
                       <th className="px-3 py-2 font-medium">Module</th>
                       <th className="px-3 py-2 font-medium">Status</th>
-                      <th className="px-3 py-2 font-medium">Tenant Decision</th>
+                      <th className="px-3 py-2 font-medium">Connection decision</th>
                       <th className="px-3 py-2 font-medium">Email</th>
-                      <th className="px-3 py-2 font-medium">Idempotency</th>
+                      <th className="px-3 py-2 font-medium" title="A reference that prevents the same setup request from being applied twice.">Request safety reference</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -931,7 +1124,7 @@ export const TenantManagementPage: React.FC = () => {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Tenant Management</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Manage tenant branding and storage stack with per-tenant isolation and secure media handling.
+          Manage each organization's appearance and file storage without exposing another organization's information.
         </p>
       </div>
 
@@ -1009,6 +1202,10 @@ export const TenantManagementPage: React.FC = () => {
               <label className="flex cursor-pointer items-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-xs text-gray-700">
                 <Upload className="h-4 w-4" /> Favicon
                 <input type="file" className="hidden" onChange={(e) => onUploadLogo('favicon', e.target.files?.[0] || null)} />
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-xs text-gray-700">
+                <Upload className="h-4 w-4" /> Login background
+                <input type="file" accept="image/*" className="hidden" onChange={(e) => onUploadLogo('login_background', e.target.files?.[0] || null)} />
               </label>
             </div>
             <button className="btn-primary" disabled={saving} onClick={onSaveBranding}>

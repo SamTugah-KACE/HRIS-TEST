@@ -43,6 +43,9 @@ def configure_keycloak_realm_email_if_enabled() -> dict:
                     "starttls": str(bool(settings.smtp_use_tls)).lower(),
                     "ssl": str(bool(settings.smtp_use_ssl)).lower(),
                 },
+                # Keep existing realms aligned with the imported realm. Realm
+                # import only applies when a realm is first created.
+                "loginTheme": "hris-platform",
             }
         )
         if (settings.keycloak_email_theme or "").strip():

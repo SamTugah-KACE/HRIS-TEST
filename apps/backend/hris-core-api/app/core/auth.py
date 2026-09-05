@@ -9,6 +9,9 @@ from pydantic import BaseModel
 from app.core.settings import get_settings
 from app.services import automation_store
 from app.services.tenant_registry_client import list_tenant_mappings
+from app.services.jwks_cache import JwksUnavailable, get_jwks
+from app.services.server_sessions import SESSION_COOKIE_NAME, load_session
+from app.services.recovery_auth import RECOVERY_COOKIE_NAME, load_recovery_session
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -215,12 +218,9 @@ def _decode_keycloak_token(token: str) -> dict:
         raise RuntimeError("Keycloak is not configured but auth_mode=keycloak")
 
     try:
-        response = httpx.get(str(settings.keycloak_jwks_url), timeout=5.0)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"Unable to fetch JWKS from Keycloak: {exc}") from exc
-
-    jwks = response.json()
+        jwks = get_jwks()
+    except JwksUnavailable as exc:
+        raise RuntimeError("Unable to validate identity provider signing keys") from exc
     keys = jwks.get("keys") if isinstance(jwks, dict) else None
     if not isinstance(keys, list) or len(keys) == 0:
         raise RuntimeError("JWKS payload does not contain signing keys")
@@ -234,6 +234,13 @@ def _decode_keycloak_token(token: str) -> dict:
         )
 
     signing_key = next((key for key in keys if key.get("kid") == token_kid), None)
+    if signing_key is None:
+        # A new Keycloak signing key can legitimately appear between refreshes.
+        try:
+            refreshed = get_jwks(force_refresh=True)
+            signing_key = next((key for key in refreshed.get("keys", []) if key.get("kid") == token_kid), None)
+        except JwksUnavailable:
+            signing_key = None
     if signing_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -330,9 +337,32 @@ async def _get_user_keycloak(
     if credentials is not None:
         token = credentials.credentials
     else:
-        token = request.cookies.get("hris_access_token")
+        session_id = str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+        server_session = load_session(session_id) if session_id else None
+        token = str((server_session or {}).get("access_token") or "").strip() or None
+        # Temporary rolling-deployment compatibility. New logins never create
+        # this cookie; remove after all existing sessions have expired.
+        if token is None:
+            token = request.cookies.get("hris_access_token")
 
     if token is None:
+        recovery_session_id = str(request.cookies.get(RECOVERY_COOKIE_NAME) or "").strip()
+        recovery = load_recovery_session(recovery_session_id) if recovery_session_id else None
+        if recovery:
+            return AuthenticatedUser(
+                sub=str(recovery["user_id"]),
+                username=str(recovery["username"]),
+                email=None,
+                tenant_id=str(recovery["tenant_id"]),
+                roles=["hris:employee"],
+                effective_role="hris:employee",
+                employee_id=str(recovery["user_id"]),
+                raw_token=None,
+                token_claims={
+                    "auth_context": "recovery",
+                    "original_role": str(recovery["role_class"]),
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication token",

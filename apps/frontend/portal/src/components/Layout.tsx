@@ -4,11 +4,13 @@ import { Sidebar } from './Sidebar';
 import { Navbar } from './Navbar';
 import { ModuleAlertBanner } from './ModuleAlertBanner';
 import { clsx } from 'clsx';
+import { useAuth } from '../auth/AuthProvider';
 
 export const Layout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const location = useLocation();
+  const { user } = useAuth();
 
   // Module workspace pages render an iframe that self-reports its height and
   // scrolls via HRIS's own scrollbar. Remove padding so the iframe fills flush.
@@ -30,6 +32,11 @@ export const Layout: React.FC = () => {
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebarCollapse={() => setSidebarCollapsed((v) => !v)}
         />
+        {user?.restricted ? (
+          <div role="status" className="border-b border-amber-300 bg-amber-100 px-4 py-2 text-sm font-medium text-amber-950">
+            Restricted recovery session: sensitive administration and account changes are unavailable. Sign in normally when the identity service returns.
+          </div>
+        ) : null}
         <main
           className={clsx(
             'flex-1 overflow-y-auto bg-gray-50 transition-colors dark:bg-gray-950',

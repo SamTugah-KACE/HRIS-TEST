@@ -257,21 +257,10 @@ def main() -> int:
 
     procs: list[subprocess.Popen] = []
 
-    print("[STACK] Stage 1/3: starting HRIS Core API...")
-    core = _start_process_with_env(
-        prefix="CORE",
-        command=[python_exe, "-m", "uvicorn", "app.main:app", "--reload", "--port", str(args.core_port)],
-        cwd=core_dir,
-        env_overrides={
-            "TENANT_REGISTRY_BASE_URL": f"http://127.0.0.1:{registry_port}",
-        },
-    )
-    procs.append(core)
-    if not wait_process_alive("HRIS Core API", core, seconds=5):
-        terminate_processes(procs)
-        return 1
-
-    print("[STACK] Stage 2/3: starting Tenant Registry...")
+    # The Core API performs idempotent first-install inventory reconciliation
+    # during startup, so its canonical Tenant Registry dependency must be ready
+    # before Core begins. Docker already enforces the same ordering by healthcheck.
+    print("[STACK] Stage 1/4: starting Tenant Registry...")
     registry = start_process(
         "REGISTRY",
         [python_exe, "-m", "uvicorn", "app.main:app", "--reload", "--port", str(registry_port)],
@@ -287,6 +276,20 @@ def main() -> int:
         terminate_processes(procs)
         return 1
     print("[STACK] Tenant Registry healthy.")
+
+    print("[STACK] Stage 2/4: starting HRIS Core API...")
+    core = _start_process_with_env(
+        prefix="CORE",
+        command=[python_exe, "-m", "uvicorn", "app.main:app", "--reload", "--port", str(args.core_port)],
+        cwd=core_dir,
+        env_overrides={
+            "TENANT_REGISTRY_BASE_URL": f"http://127.0.0.1:{registry_port}",
+        },
+    )
+    procs.append(core)
+    if not wait_process_alive("HRIS Core API", core, seconds=5):
+        terminate_processes(procs)
+        return 1
 
     if not wait_stage_ready(
         stage_name="HRIS Core API",

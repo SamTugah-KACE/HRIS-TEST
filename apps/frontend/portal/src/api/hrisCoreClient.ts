@@ -433,6 +433,13 @@ export type FederatedKeycloakSyncResponse = {
   results: FederatedKeycloakSyncResultRow[];
 };
 
+export type FederatedEnrollmentJob = {
+  job_id: string;
+  status: 'queued' | 'running' | 'completed' | 'completed_with_errors' | 'failed';
+  result_json?: FederatedKeycloakSyncResponse | null;
+  error_message?: string | null;
+};
+
 function unwrapEnvelopeData<T>(payload: unknown): T {
   const maybeEnvelope = payload as { data?: T } | null;
   if (maybeEnvelope && typeof maybeEnvelope === 'object' && 'data' in maybeEnvelope && maybeEnvelope.data) {
@@ -690,6 +697,33 @@ export const listNativeTenantInventory = async (module?: string): Promise<Native
   return r.data.items || [];
 };
 
+export type NativeTenantRefreshResult = {
+  module: string;
+  ok: boolean;
+  result?: {
+    scanned?: number;
+    native_inventory_upserted?: number;
+    canonical_tenants_created?: number;
+    errors?: Array<Record<string, string>>;
+  };
+  error?: string;
+};
+
+export const refreshNativeTenantInventory = async (
+  modules: string[] = ['srms', 'eappraisal'],
+  maxRecords = 500,
+): Promise<{ results: NativeTenantRefreshResult[]; items: NativeTenantInventoryRow[] }> => {
+  const r = await httpClient.post('/federation/native-tenants/refresh', {
+    modules,
+    max_records: maxRecords,
+  }, {
+    // External inventory synchronization has a larger explicit bound than
+    // normal interactive requests, which remain capped at fifteen seconds.
+    timeout: 90_000,
+  });
+  return r.data;
+};
+
 export const createTenantLinkClaim = async (payload: {
   canonical_tenant_id: string; module_name: string; native_tenant_id: string;
   reason: string; expected_link_version?: number;
@@ -713,9 +747,14 @@ export const approveTenantLinkClaim = async (claimId: string, reason: string): P
   return r.data;
 };
 
+export const retryTenantLinkCompletion = async (claimId: string): Promise<unknown> => {
+  const r = await httpClient.post(`/federation/claims/${encodeURIComponent(claimId)}/retry-completion`);
+  return r.data;
+};
+
 export const updateTenantBranding = async (
   tenantId: string,
-  payload: { brand_name?: string; support_email?: string; theme?: Record<string, unknown> }
+  payload: { brand_name?: string; short_name?: string; support_email?: string; support_phone?: string; website?: string; locale?: string; timezone?: string; date_format?: string; theme?: Record<string, unknown> }
 ): Promise<TenantBrandingResponse> => {
   const r = await httpClient.put<TenantBrandingResponse>(`/tenants/${encodeURIComponent(tenantId)}/branding`, payload);
   return r.data;
@@ -723,7 +762,7 @@ export const updateTenantBranding = async (
 
 export const uploadTenantLogo = async (
   tenantId: string,
-  logoKind: 'primary' | 'symbol' | 'favicon',
+  logoKind: 'primary' | 'symbol' | 'favicon' | 'login_background',
   file: File
 ): Promise<TenantBrandingResponse> => {
   const form = new FormData();
@@ -736,10 +775,63 @@ export const uploadTenantLogo = async (
   return r.data;
 };
 
+export type PlatformCapability = {
+  name: string;
+  mode: 'disabled' | 'optional' | 'required';
+  enabled: boolean;
+  tenant_enabled: boolean;
+  source: string;
+  reason_code: string;
+};
+
+export const getPlatformCapabilities = async (): Promise<PlatformCapability[]> => {
+  const r = await httpClient.get<{ capabilities: PlatformCapability[] }>('/api/hris/v1/capabilities');
+  return r.data.capabilities || [];
+};
+
+export type TenantDomain = { hostname: string; domain_type: 'platform' | 'custom'; status: string; verified_at?: string | null };
+
+export const getTenantDomains = async (tenantId: string): Promise<TenantDomain[]> => {
+  const r = await httpClient.get<{ domains: TenantDomain[] }>(`/api/hris/v1/tenants/${encodeURIComponent(tenantId)}/domains`);
+  return r.data.domains || [];
+};
+
+export const createTenantPlatformDomain = async (tenantId: string, slug: string): Promise<TenantDomain> => {
+  const r = await httpClient.post<TenantDomain>(`/api/hris/v1/tenants/${encodeURIComponent(tenantId)}/domains/platform`, { slug });
+  return r.data;
+};
+
+export const requestTenantCustomDomain = async (tenantId: string, hostname: string): Promise<TenantDomain & { dns_record?: { type: string; name: string; value: string } }> => {
+  const r = await httpClient.post(`/api/hris/v1/tenants/${encodeURIComponent(tenantId)}/domains/custom`, { hostname });
+  return r.data;
+};
+
 export type TenantOnboardingImportResponse = {
   imported: boolean;
+  tenant_id: string;
   result: unknown;
-  modules?: Record<string, unknown>;
+  modules: Record<string, {
+    status: string;
+    created?: boolean;
+    native_tenant_id?: string;
+    routing_key?: string;
+    schema_name?: string | null;
+    detail?: string;
+    notification?: {
+      owner?: string;
+      workflow?: string;
+      status: string;
+      detail?: string;
+    };
+  }>;
+  orchestration: {
+    status: 'completed' | 'completed_with_errors';
+    requested_modules: number;
+    ready_modules: number;
+    failed_modules: number;
+    notification_policy: 'native_module_owned';
+    next_step: string;
+  };
 };
 
 export const importTenantOnboarding = async (
@@ -793,12 +885,42 @@ export const runFederatedKeycloakSync = async (params?: {
   dry_run?: boolean;
   max_users?: number;
 }): Promise<FederatedKeycloakSyncResponse> => {
-  const r = await httpClient.post<FederatedKeycloakSyncResponse>(
+  const r = await httpClient.post<FederatedEnrollmentJob>(
     params?.dry_run === false
       ? '/integrations/synchronization/enrollment/apply'
       : '/integrations/synchronization/enrollment/preview',
     null,
     { params: { tenant_id: params?.tenant_id, max_users: params?.max_users } }
   );
-  return r.data;
+  const jobId = String(r.data?.job_id || '');
+  if (!jobId) throw new Error('Enrollment service returned no job identifier.');
+
+  // Enrollment performs remote module discovery and is intentionally queued.
+  // Poll the durable job instead of holding an API request/thread open.
+  const deadline = Date.now() + 10 * 60_000;
+  let delayMs = 750;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+    const jobResponse = await httpClient.get<FederatedEnrollmentJob>(
+      `/integrations/synchronization/enrollment/jobs/${encodeURIComponent(jobId)}`
+    );
+    const job = jobResponse.data;
+    if (job.status === 'failed') {
+      throw new Error(job.error_message || 'Federated enrollment job failed.');
+    }
+    if (job.status === 'completed' || job.status === 'completed_with_errors') {
+      const result = job.result_json;
+      if (!result || typeof result !== 'object') {
+        throw new Error('Federated enrollment job completed without a result.');
+      }
+      return {
+        ...result,
+        tenant_discovery: Array.isArray(result.tenant_discovery) ? result.tenant_discovery : [],
+        dev_credentials_exports: Array.isArray(result.dev_credentials_exports) ? result.dev_credentials_exports : [],
+        results: Array.isArray(result.results) ? result.results : [],
+      };
+    }
+    delayMs = Math.min(Math.round(delayMs * 1.4), 3_000);
+  }
+  throw new Error(`Federated enrollment job ${jobId} is still running; check enrollment job status.`);
 };

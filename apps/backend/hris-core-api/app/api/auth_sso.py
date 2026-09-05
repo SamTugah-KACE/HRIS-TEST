@@ -1,21 +1,25 @@
 import base64
 import hashlib
+import json
+import logging
 import secrets
 import time
 from typing import Dict, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
-from jose import JWTError, jwt
 from pydantic import BaseModel
 
 from app.core.auth import AuthenticatedUser, get_current_user
 from app.core.settings import get_settings
 from app.services.rate_limiter import enforce_rate_limit
+from app.services.server_sessions import SESSION_COOKIE_NAME, create_session, load_session, revoke_session
 
 router = APIRouter(prefix="/auth/sso", tags=["auth-sso"])
+logger = logging.getLogger(__name__)
 
 ACCESS_COOKIE_NAME = "hris_access_token"
 REFRESH_COOKIE_NAME = "hris_refresh_token"
@@ -49,6 +53,15 @@ def _resolve_token_url() -> str:
     settings = get_settings()
     if settings.keycloak_token_url:
         return str(settings.keycloak_token_url)
+    internal_base = str(settings.keycloak_internal_base_url or "").strip().rstrip("/")
+    if internal_base and settings.keycloak_issuer:
+        issuer_path = urlsplit(str(settings.keycloak_issuer)).path.rstrip("/")
+        if not issuer_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Keycloak issuer must include its realm path",
+            )
+        return f"{internal_base}{issuer_path}/protocol/openid-connect/token"
     if settings.keycloak_issuer:
         return f"{str(settings.keycloak_issuer).rstrip('/')}/protocol/openid-connect/token"
     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Keycloak token URL is not configured")
@@ -112,6 +125,11 @@ def _resolve_ui_origin_for_state(request: Request) -> Optional[str]:
     return None
 
 
+def _state_cipher() -> Fernet:
+    digest = hashlib.sha256(_resolve_state_signing_secret().encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
 def _sign_state(code_verifier: str, ui_redirect_path: str, ui_origin: Optional[str]) -> str:
     settings = get_settings()
     now_epoch = int(time.time())
@@ -122,27 +140,31 @@ def _sign_state(code_verifier: str, ui_redirect_path: str, ui_origin: Optional[s
         ui_redirect_path=ui_redirect_path,
         ui_origin=ui_origin,
     )
-    return jwt.encode(
-        payload.model_dump(),
-        _resolve_state_signing_secret(),
-        algorithm="HS256",
-    )
+    # Encrypt rather than merely sign the state. The PKCE verifier is a browser
+    # round-trip secret and must not be readable in URLs, browser history, or
+    # ordinary proxy/access logs.
+    serialized = json.dumps(payload.model_dump(), separators=(",", ":")).encode("utf-8")
+    return "v1." + _state_cipher().encrypt(serialized).decode("ascii")
 
 
 def _verify_state(state_token: str) -> _SignedStatePayload:
     try:
-        payload = jwt.decode(
-            state_token,
-            _resolve_state_signing_secret(),
-            algorithms=["HS256"],
-            options={"verify_aud": False, "verify_iss": False},
+        if not state_token.startswith("v1."):
+            raise InvalidToken
+        plaintext = _state_cipher().decrypt(
+            state_token[3:].encode("ascii"),
+            ttl=get_settings().auth_state_ttl_seconds,
         )
-    except JWTError as exc:
+        payload = json.loads(plaintext)
+        state_payload = _SignedStatePayload(**payload)
+        now_epoch = int(time.time())
+        if state_payload.exp < now_epoch or state_payload.iat > now_epoch + 30:
+            raise InvalidToken
+    except (InvalidToken, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired SSO state",
         ) from exc
-    state_payload = _SignedStatePayload(**payload)
     state_payload.ui_redirect_path = _normalize_next_path(state_payload.ui_redirect_path)
     return state_payload
 
@@ -195,28 +217,24 @@ def _set_auth_cookies(
 ) -> None:
     settings = get_settings()
     cookie_settings = _build_cookie_settings(request)
-    access_max_age = access_expires_in or settings.auth_cookie_access_max_age_seconds
+    refresh_max_age = refresh_expires_in or settings.auth_cookie_refresh_max_age_seconds
+    session_id = create_session(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        id_token=id_token,
+        access_expires_in=access_expires_in,
+        refresh_expires_in=refresh_expires_in,
+        user_agent=str(request.headers.get("user-agent") or ""),
+    )
     response.set_cookie(
-        key=ACCESS_COOKIE_NAME,
-        value=access_token,
-        max_age=max(60, int(access_max_age)),
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=max(60, int(refresh_max_age)),
         **cookie_settings,
     )
-    if refresh_token:
-        refresh_max_age = refresh_expires_in or settings.auth_cookie_refresh_max_age_seconds
-        response.set_cookie(
-            key=REFRESH_COOKIE_NAME,
-            value=refresh_token,
-            max_age=max(60, int(refresh_max_age)),
-            **cookie_settings,
-        )
-    if id_token:
-        response.set_cookie(
-            key=ID_TOKEN_COOKIE_NAME,
-            value=id_token,
-            max_age=max(60, int(access_max_age)),
-            **cookie_settings,
-        )
+    # Remove legacy token cookies during the rolling migration to opaque BFF sessions.
+    for legacy_name in (ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, ID_TOKEN_COOKIE_NAME):
+        response.delete_cookie(legacy_name, path="/", domain=settings.auth_cookie_domain)
     _set_csrf_cookie(request, response, csrf_token=secrets.token_urlsafe(32))
 
 
@@ -226,6 +244,7 @@ def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(ACCESS_COOKIE_NAME, **delete_kwargs)
     response.delete_cookie(REFRESH_COOKIE_NAME, **delete_kwargs)
     response.delete_cookie(ID_TOKEN_COOKIE_NAME, **delete_kwargs)
+    response.delete_cookie(SESSION_COOKIE_NAME, **delete_kwargs)
     response.delete_cookie(settings.auth_csrf_cookie_name, **delete_kwargs)
 
 
@@ -294,6 +313,8 @@ def sso_callback(
     request: Request,
     code: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None),
 ):
     settings = get_settings()
     enforce_rate_limit(
@@ -301,6 +322,20 @@ def sso_callback(
         scope="auth_sso_callback",
         limit=settings.rate_limit_auth_callback_max,
     )
+    if error:
+        logger.warning(
+            "Keycloak authorization callback rejected error=%s description=%s",
+            error[:64],
+            (error_description or "")[:120],
+        )
+        return RedirectResponse(
+            url=_build_portal_error_redirect(
+                "identity_action_expired"
+                if "authentication_expired" in (error_description or "").lower()
+                else "identity_sign_in_failed"
+            ),
+            status_code=status.HTTP_302_FOUND,
+        )
     if not code or not state:
         return RedirectResponse(
             url=_build_portal_error_redirect("missing_code_or_state"),
@@ -319,9 +354,13 @@ def sso_callback(
             }
         )
     except HTTPException as exc:
-        reason = str(exc.detail) if exc.detail else "sso_callback_failed"
+        logger.warning(
+            "SSO callback failed status=%s category=%s",
+            exc.status_code,
+            _callback_failure_category(exc),
+        )
         return RedirectResponse(
-            url=_build_portal_error_redirect(reason),
+            url=_build_portal_error_redirect(_callback_failure_category(exc)),
             status_code=status.HTTP_302_FOUND,
         )
 
@@ -351,13 +390,17 @@ def sso_session(user: AuthenticatedUser = Depends(get_current_user)):
         "roles": user.roles,
         "effective_role": user.effective_role,
         "employee_id": user.employee_id,
+        "auth_context": str(user.token_claims.get("auth_context") or "normal"),
+        "restricted": str(user.token_claims.get("auth_context") or "normal") == "recovery",
     }
 
 
 @router.post("/refresh")
 def sso_refresh(request: Request):
     settings = get_settings()
-    refresh_token_hint = str(request.cookies.get(REFRESH_COOKIE_NAME) or "").strip()
+    session_id = str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    current_session = load_session(session_id) or {}
+    refresh_token_hint = str(current_session.get("refresh_token") or "").strip()
     enforce_rate_limit(
         request,
         scope="auth_sso_refresh",
@@ -365,7 +408,7 @@ def sso_refresh(request: Request):
         user_key=(f"refresh:{refresh_token_hint[:24]}" if refresh_token_hint else None),
     )
     _require_csrf(request)
-    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    refresh_token = str(current_session.get("refresh_token") or "").strip()
     if not refresh_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing refresh session")
 
@@ -376,6 +419,7 @@ def sso_refresh(request: Request):
         }
     )
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    revoke_session(session_id)
     _set_auth_cookies(
         request=request,
         response=response,
@@ -411,8 +455,9 @@ def _resolve_revoke_url() -> Optional[str]:
         token_url = str(settings.keycloak_token_url).rstrip("/")
         if token_url.endswith("/token"):
             return f"{token_url[:-6]}/revoke"
-    if settings.keycloak_issuer:
-        return f"{str(settings.keycloak_issuer).rstrip('/')}/protocol/openid-connect/revoke"
+    token_url = _resolve_token_url() if settings.keycloak_issuer else None
+    if token_url and token_url.endswith("/token"):
+        return f"{token_url[:-6]}/revoke"
     return None
 
 
@@ -420,8 +465,9 @@ def _resolve_backchannel_logout_url() -> Optional[str]:
     settings = get_settings()
     if settings.keycloak_end_session_url:
         return str(settings.keycloak_end_session_url)
-    if settings.keycloak_issuer:
-        return f"{str(settings.keycloak_issuer).rstrip('/')}/protocol/openid-connect/logout"
+    token_url = _resolve_token_url() if settings.keycloak_issuer else None
+    if token_url and token_url.endswith("/token"):
+        return f"{token_url[:-6]}/logout"
     return None
 
 
@@ -493,10 +539,24 @@ def _build_portal_error_redirect(reason: str) -> str:
     return f"{settings.portal_base_url.rstrip('/')}/?auth_error={safe_reason}"
 
 
+def _callback_failure_category(exc: HTTPException) -> str:
+    """Return a stable, non-sensitive browser error code."""
+    detail = str(exc.detail or "").lower()
+    if "state" in detail:
+        return "invalid_or_expired_sign_in"
+    if exc.status_code == status.HTTP_502_BAD_GATEWAY:
+        return "identity_service_unavailable"
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        return "identity_token_exchange_failed"
+    return "identity_sign_in_failed"
+
+
 @router.post("/logout")
 def sso_logout(request: Request):
     settings = get_settings()
-    access_token_hint = str(request.cookies.get(ACCESS_COOKIE_NAME) or "").strip()
+    session_id = str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    current_session = load_session(session_id) or {}
+    access_token_hint = str(current_session.get("access_token") or "").strip()
     enforce_rate_limit(
         request,
         scope="auth_sso_logout",
@@ -504,9 +564,9 @@ def sso_logout(request: Request):
         user_key=(f"access:{access_token_hint[:24]}" if access_token_hint else None),
     )
     _require_csrf(request)
-    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
-    access_token = request.cookies.get(ACCESS_COOKIE_NAME)
-    id_token = request.cookies.get(ID_TOKEN_COOKIE_NAME)
+    refresh_token = str(current_session.get("refresh_token") or "") or None
+    access_token = str(current_session.get("access_token") or "") or None
+    id_token = str(current_session.get("id_token") or "") or None
     logout_url = _build_end_session_url(
         id_token_hint=id_token,
     )
@@ -524,5 +584,6 @@ def sso_logout(request: Request):
             revoke_error=revoke_error,
         ).model_dump_json(),
     )
+    revoke_session(session_id)
     _clear_auth_cookies(response)
     return response

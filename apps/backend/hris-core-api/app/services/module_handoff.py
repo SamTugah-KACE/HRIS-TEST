@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -9,12 +10,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import HTTPException
-from jose import JWTError, jwt
-
 from app.core.auth import AuthenticatedUser
 from app.core.settings import Settings, get_settings
 
-ALGORITHM = "HS256"
 TOKEN_QUERY_PARAM = "hris_handoff"
 
 MODULE_ALLOWED_ROUTE_PREFIXES = {
@@ -22,18 +20,6 @@ MODULE_ALLOWED_ROUTE_PREFIXES = {
     "eleave": ("/", "/dashboard", "/modules/leave", "/leave"),
     "srms": ("/", "/dashboard", "/employees", "/profile"),
 }
-
-
-def _secret(settings: Settings) -> str:
-    for candidate in (
-        settings.module_token_secret,
-        settings.auth_state_secret,
-        settings.keycloak_portal_client_secret,
-    ):
-        value = str(candidate or "").strip()
-        if value:
-            return value
-    raise HTTPException(status_code=500, detail="Module handoff secret is not configured")
 
 
 def token_fingerprint(token: str) -> str:
@@ -76,31 +62,40 @@ class HandoffIssueResult:
     target_route: str
 
 
-class _ReplayStore:
-    """Replay store with shared database support and local test fallback."""
+class _CodeStore:
+    """Opaque code store with shared database support and local test fallback."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._redeemed: Dict[str, int] = {}
+        self._codes: Dict[str, Dict[str, Any]] = {}
 
-    def claim_once(self, jti: str, exp: int, payload: Dict[str, Any], settings: Settings) -> bool:
+    def issue(self, code: str, payload: Dict[str, Any], settings: Settings) -> None:
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
         if str(settings.automation_store_database_url or "").strip():
             from app.services import automation_store
+            automation_store.create_module_handoff_code(code_hash=code_hash, payload=payload)
+            return
+        if str(settings.app_env or "").lower() == "production":
+            raise HTTPException(status_code=503, detail="Shared module handoff store is unavailable")
+        with self._lock:
+            self._codes[code_hash] = dict(payload)
 
-            return automation_store.claim_module_handoff_jti(jti=jti, exp=exp, payload=payload)
-
+    def consume(self, code: str, settings: Settings) -> Optional[Dict[str, Any]]:
+        code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        if str(settings.automation_store_database_url or "").strip():
+            from app.services import automation_store
+            return automation_store.consume_module_handoff_code(code_hash=code_hash)
+        if str(settings.app_env or "").lower() == "production":
+            return None
         now_epoch = int(time.time())
         with self._lock:
-            expired = [key for key, ttl in self._redeemed.items() if ttl <= now_epoch]
+            expired = [key for key, value in self._codes.items() if int(value.get("exp") or 0) <= now_epoch]
             for key in expired:
-                self._redeemed.pop(key, None)
-            if jti in self._redeemed:
-                return False
-            self._redeemed[jti] = max(exp, now_epoch + 1)
-            return True
+                self._codes.pop(key, None)
+            return self._codes.pop(code_hash, None)
 
 
-_REPLAY_STORE = _ReplayStore()
+_CODE_STORE = _CodeStore()
 
 
 def issue_handoff_token(
@@ -116,6 +111,7 @@ def issue_handoff_token(
     now_epoch = int(time.time())
     expires_at = now_epoch + int(cfg.module_handoff_ttl_seconds)
     jti = str(uuid4())
+    code = secrets.token_urlsafe(32)
     payload: Dict[str, Any] = {
         "iss": str(cfg.module_handoff_issuer or "hris-core"),
         "sub": str(user.sub),
@@ -132,14 +128,15 @@ def issue_handoff_token(
         # authoritative for selecting and protecting native UI functionality.
         "roles": list(user.roles or []),
         "effective_role": str(user.effective_role or ""),
+        "auth_context": str((user.token_claims or {}).get("auth_context") or "normal"),
         "target_route": _normalize_target_route(target_route, module_id),
         "iat": now_epoch,
         "exp": expires_at,
         "jti": jti,
     }
-    token = jwt.encode(payload, _secret(cfg), algorithm=ALGORITHM)
+    _CODE_STORE.issue(code, payload, cfg)
     return HandoffIssueResult(
-        token=token,
+        token=code,
         jti=jti,
         expires_at=expires_at,
         target_route=str(payload["target_route"]),
@@ -191,15 +188,9 @@ def redeem_handoff_token(
     settings: Optional[Settings] = None,
 ) -> Dict[str, Any]:
     cfg = settings or get_settings()
-    try:
-        payload = jwt.decode(
-            str(token or "").strip(),
-            _secret(cfg),
-            algorithms=[ALGORITHM],
-            options={"verify_aud": False},
-        )
-    except JWTError as exc:
-        raise HTTPException(status_code=401, detail="Invalid or expired handoff token") from exc
+    payload = _CODE_STORE.consume(str(token or "").strip(), cfg)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid, expired, or already used handoff code")
 
     aud = str(payload.get("aud") or "").strip().lower()
     expected_module = str(module_id or "").strip().lower()
@@ -212,10 +203,8 @@ def redeem_handoff_token(
 
     jti = str(payload.get("jti") or "").strip()
     exp = int(payload.get("exp") or 0)
-    if not jti or exp <= 0:
-        raise HTTPException(status_code=401, detail="Handoff token missing required claims")
-    if not _REPLAY_STORE.claim_once(jti, exp, payload, cfg):
-        raise HTTPException(status_code=409, detail="Handoff token replay detected")
+    if not jti or exp <= int(time.time()):
+        raise HTTPException(status_code=401, detail="Handoff code expired or missing required claims")
 
     route = _normalize_target_route(str(payload.get("target_route") or "/"), expected_module)
     return {
@@ -227,6 +216,7 @@ def redeem_handoff_token(
         "last_name": str(payload.get("last_name") or ""),
         "roles": [str(role) for role in (payload.get("roles") or [])],
         "effective_role": str(payload.get("effective_role") or ""),
+        "auth_context": str(payload.get("auth_context") or "normal"),
         "tenant_id": token_tenant,
         "tenant_routing_key": str(payload.get("tenant_routing_key") or "").strip().lower(),
         "module_id": expected_module,

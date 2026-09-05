@@ -52,6 +52,7 @@ export const ModuleWorkspacePage: React.FC<{ fixedModuleId?: string }> = ({ fixe
 
       {/* ── Module iframe — fills all remaining body height ─────────────────── */}
       <ModuleFrame
+        key={normalizedModuleId}
         moduleId={normalizedModuleId}
         title={`${normalizedModuleId} workspace`}
         className="w-full border-0"

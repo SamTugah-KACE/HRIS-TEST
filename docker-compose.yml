@@ -1,8 +1,29 @@
 x-hris-core-api-env: &hris_core_api_env
   # Purpose: Configures app env.
   APP_ENV: ${HRIS_APP_ENV:-development}
+  # Runtime may be local, but HR business data must come from production systems.
+  HRIS_DATA_SOURCE_MODE: ${HRIS_DATA_SOURCE_MODE:-production}
   # Purpose: Configures auth mode.
   AUTH_MODE: ${HRIS_AUTH_MODE:-keycloak}
+  HRIS_DEPLOYMENT_MODE: ${HRIS_DEPLOYMENT_MODE:-single}
+  HRIS_ALLOW_SINGLE_NODE_PRODUCTION: ${HRIS_ALLOW_SINGLE_NODE_PRODUCTION:-false}
+  HRIS_COMPONENT_PRIMARY_DATABASE_MODE: ${HRIS_COMPONENT_PRIMARY_DATABASE_MODE:-required}
+  HRIS_COMPONENT_TENANT_REGISTRY_MODE: ${HRIS_COMPONENT_TENANT_REGISTRY_MODE:-required}
+  HRIS_COMPONENT_KEYCLOAK_MODE: ${HRIS_COMPONENT_KEYCLOAK_MODE:-required}
+  HRIS_COMPONENT_AUDIT_LOG_MODE: ${HRIS_COMPONENT_AUDIT_LOG_MODE:-required}
+  HRIS_COMPONENT_REDIS_MODE: ${HRIS_COMPONENT_REDIS_MODE:-optional}
+  HRIS_COMPONENT_BACKGROUND_WORKERS_MODE: ${HRIS_COMPONENT_BACKGROUND_WORKERS_MODE:-optional}
+  HRIS_COMPONENT_SCHEDULER_MODE: ${HRIS_COMPONENT_SCHEDULER_MODE:-optional}
+  HRIS_COMPONENT_SRMS_MODE: ${HRIS_COMPONENT_SRMS_MODE:-optional}
+  HRIS_COMPONENT_EAPPRAISAL_MODE: ${HRIS_COMPONENT_EAPPRAISAL_MODE:-optional}
+  HRIS_COMPONENT_ELEAVE_MODE: ${HRIS_COMPONENT_ELEAVE_MODE:-disabled}
+  HRIS_COMPONENT_SMS_MODE: ${HRIS_COMPONENT_SMS_MODE:-disabled}
+  HRIS_COMPONENT_EMAIL_MODE: ${HRIS_COMPONENT_EMAIL_MODE:-optional}
+  HRIS_COMPONENT_DATABASE_SHARDING_MODE: ${HRIS_COMPONENT_DATABASE_SHARDING_MODE:-disabled}
+  HRIS_COMPONENT_SHARD_ROUTER_MODE: ${HRIS_COMPONENT_SHARD_ROUTER_MODE:-optional}
+  HRIS_COMPONENT_METRICS_MODE: ${HRIS_COMPONENT_METRICS_MODE:-optional}
+  HRIS_COMPONENT_TRACING_MODE: ${HRIS_COMPONENT_TRACING_MODE:-disabled}
+  HRIS_COMPONENT_NETWORK_MONITORING_MODE: ${HRIS_COMPONENT_NETWORK_MONITORING_MODE:-disabled}
   # Purpose: Configures use stub data.
   USE_STUB_DATA: ${HRIS_USE_STUB_DATA:-false}
   # Purpose: Configures dev default tenant id.
@@ -44,6 +65,18 @@ x-hris-core-api-env: &hris_core_api_env
   CORS_ALLOWED_ORIGINS: ${HRIS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
   # Purpose: Secret/configuration for auth state secret; inject securely and never commit a real value.
   AUTH_STATE_SECRET: ${HRIS_AUTH_STATE_SECRET:-}
+  AUTH_SESSION_ENCRYPTION_KEY: ${HRIS_AUTH_SESSION_ENCRYPTION_KEY:-}
+  PROVIDER_SECRET_ENCRYPTION_KEY: ${HRIS_PROVIDER_SECRET_ENCRYPTION_KEY:-}
+  AUTH_JWKS_CACHE_TTL_SECONDS: ${HRIS_AUTH_JWKS_CACHE_TTL_SECONDS:-900}
+  AUTH_JWKS_CACHE_MAX_STALE_SECONDS: ${HRIS_AUTH_JWKS_CACHE_MAX_STALE_SECONDS:-3600}
+  HRIS_AUTH_RECOVERY_MODE: ${HRIS_AUTH_RECOVERY_MODE:-disabled}
+  HRIS_AUTH_RECOVERY_MANUAL_ACTIVE: ${HRIS_AUTH_RECOVERY_MANUAL_ACTIVE:-false}
+  HRIS_AUTH_RECOVERY_PEPPER: ${HRIS_AUTH_RECOVERY_PEPPER:-}
+  KEYCLOAK_HEALTH_URLS: ${HRIS_KEYCLOAK_HEALTH_URLS:-http://keycloak:9000/health/ready}
+  HRIS_PLATFORM_BASE_DOMAIN: ${HRIS_PLATFORM_BASE_DOMAIN:-hris.local}
+  HRIS_TRUSTED_HOSTNAMES: ${HRIS_TRUSTED_HOSTNAMES:-localhost,127.0.0.1,hris-core-api}
+  ARKESEL_API_KEY: ${HRIS_ARKESEL_API_KEY:-}
+  ARKESEL_SENDER_ID: ${HRIS_ARKESEL_SENDER_ID:-HRIS}
   # Purpose: Secret/configuration for auth cookie secure; inject securely and never commit a real value.
   AUTH_COOKIE_SECURE: ${HRIS_AUTH_COOKIE_SECURE:-false}
   # Purpose: Secret/configuration for auth cookie samesite; inject securely and never commit a real value.
@@ -66,6 +99,11 @@ x-hris-core-api-env: &hris_core_api_env
   SRMS_HRIS_SHARED_SECRET: ${HRIS_SRMS_HRIS_SHARED_SECRET:-}
   # Purpose: Secret/configuration for srms hris service token; inject securely and never commit a real value.
   SRMS_HRIS_SERVICE_TOKEN: ${HRIS_SRMS_HRIS_SERVICE_TOKEN:-}
+  # Production e-Appraisal read/integration contract. No fixtures or local data fallback.
+  EAPPRAISAL_INTEGRATION_BASE_URL: ${HRIS_EAPPRAISAL_INTEGRATION_BASE_URL:-https://appraisal.gi-kace.com.gh}
+  EAPPRAISAL_HRIS_SHARED_SECRET: ${HRIS_EAPPRAISAL_HRIS_SHARED_SECRET:-}
+  EAPPRAISAL_HRIS_SERVICE_TOKEN: ${HRIS_EAPPRAISAL_HRIS_SERVICE_TOKEN:-}
+  EAPPRAISAL_FIXTURE_FILE: ""
   # Purpose: Feature flag controlling enable startup tenant inventory import.
   ENABLE_STARTUP_TENANT_INVENTORY_IMPORT: ${HRIS_ENABLE_STARTUP_TENANT_INVENTORY_IMPORT:-true}
   # Purpose: Configures startup tenant inventory max records.
@@ -248,7 +286,8 @@ services:
       POSTGRES_DB: hris_tenant_registry
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./infra/db-init:/docker-entrypoint-initdb.d:ro
+      # Required database structure only. Product development never loads sample tenants.
+      - ./infra/db-init/00_keycloak_schema.sql:/docker-entrypoint-initdb.d/00_keycloak_schema.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -275,6 +314,10 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-admin}
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_PORT: 8080
+      # Keep one canonical browser-visible issuer while allowing Core API calls
+      # over Docker's private service network.
+      KC_HOSTNAME: ${HRIS_KEYCLOAK_PUBLIC_BASE_URL:-http://localhost:8080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     volumes:
       - ./identity:/opt/keycloak/data/import:ro
       - ./identity/themes/hris-platform:/opt/keycloak/themes/hris-platform:ro

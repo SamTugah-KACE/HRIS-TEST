@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 def _requires_automation_store() -> bool:
     settings = get_settings()
     return bool(
-        settings.enable_post_deploy_sync_automation
+        (settings.automation_store_database_url or "").strip()
+        or settings.module_handoff_enabled
+        or settings.enable_post_deploy_sync_automation
         or settings.enable_auto_sync_loop
         or settings.onboarding_welcome_email_enabled
         or settings.post_deploy_welcome_emails_enabled
@@ -83,13 +85,28 @@ def _required_automation_tables() -> list[str]:
         "sync_checkpoints",
         "provisioning_audit_store",
         "module_probe_history",
+        "module_handoff_replay",
+        "module_handoff_codes",
         "drift_snapshots",
         "federated_directory_snapshots",
         "welcome_dispatch",
+        "email_provider_state",
         "enrollment_jobs",
         "email_delivery_audit",
         "tenant_runtime_settings",
+        "tenant_link_ledger",
+        "native_tenant_inventory",
+        "tenant_module_projections",
+        "tenant_link_claims",
+        "tenant_link_events",
+        "tenant_memberships",
         "media_documents",
+        "auth_sessions",
+        "recovery_directory",
+        "recovery_challenges",
+        "recovery_sessions",
+        "tenant_domains",
+        "tenant_activity_audit",
     ]
 
 

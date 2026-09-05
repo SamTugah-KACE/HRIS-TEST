@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 from starlette.responses import Response
@@ -24,6 +25,8 @@ from app.api.me import router as me_router
 from app.api.modules import router as modules_router, profile_router
 from app.api.tenants_onboarding import router as tenants_router
 from app.api.tenant_federation import router as tenant_federation_router
+from app.api.platform_foundation import router as platform_foundation_router
+from app.api.auth_recovery import router as auth_recovery_router
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
 from app.core.logging_config import configure_logging
@@ -40,6 +43,7 @@ from app.services.tenant_inventory_import import (
     import_missing_tenants_from_eappraisal,
     import_missing_tenants_from_srms,
 )
+from app.services.capability_registry import ComponentMode, component_mode
 
 settings = get_settings()
 configure_logging(settings.app_env)
@@ -59,6 +63,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+trusted_hosts = [host.strip() for host in settings.trusted_hostnames.split(",") if host.strip()]
+if settings.platform_base_domain:
+    trusted_hosts.append(f"*.{settings.platform_base_domain.strip().lower()}")
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(set(trusted_hosts or ["localhost"])))
 
 
 @app.middleware("http")
@@ -75,21 +83,29 @@ async def attach_correlation_id(request: Request, call_next):
             extra={
                 "correlation_id": correlation_id,
                 "method": request.method,
-                "path": request.url.path,
-                "query": str(request.url.query or ""),
+                "route": request.url.path,
+                "log_stream": "platform_system",
                 "duration_ms": duration_ms,
             },
         )
         raise
 
     response.headers["X-Correlation-Id"] = correlation_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+    if settings.app_env.strip().lower() == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     duration_ms = round((time.perf_counter() - start) * 1000, 2)
     logger.info(
         "HTTP request completed",
         extra={
             "correlation_id": correlation_id,
             "method": request.method,
-            "path": request.url.path,
+            "route": request.url.path,
+            "log_stream": "network_traffic",
             "status_code": response.status_code,
             "duration_ms": duration_ms,
         },
@@ -247,9 +263,13 @@ def validate_runtime_settings() -> None:
             run_post_deploy_automation(system_actor)
         except Exception:
             logger.exception("Startup post-deploy automation failed")
-    start_auto_sync_loop_if_enabled()
-    start_enrollment_worker_if_enabled()
-    start_invitation_dispatcher_if_enabled()
+    if component_mode("scheduler") != ComponentMode.DISABLED:
+        start_auto_sync_loop_if_enabled()
+    if component_mode("background_workers") != ComponentMode.DISABLED:
+        start_enrollment_worker_if_enabled()
+        start_invitation_dispatcher_if_enabled()
+    else:
+        logger.warning("Background workers intentionally disabled by component policy")
 
 
 @app.on_event("shutdown")
@@ -404,7 +424,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         extra={
             "correlation_id": correlation_id,
             "method": request.method,
-            "path": request.url.path,
+            "route": request.url.path,
+            "log_stream": "security_audit",
             "errors": exc.errors(),
         },
     )
@@ -426,7 +447,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         extra={
             "correlation_id": correlation_id,
             "method": request.method,
-            "path": request.url.path,
+            "route": request.url.path,
+            "log_stream": "platform_system",
         },
     )
     return JSONResponse(
@@ -452,6 +474,8 @@ app.include_router(integrations_debug_router)
 app.include_router(federated_directory_debug_router)
 app.include_router(integration_sync_router)
 app.include_router(jit_setup_router)
+app.include_router(platform_foundation_router)
+app.include_router(auth_recovery_router)
 
 
 @app.get("/health", tags=["health"])

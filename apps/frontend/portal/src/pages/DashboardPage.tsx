@@ -77,7 +77,7 @@ function getDashboardTitle(role: string): string {
 
 function getDashboardSubtitle(role: string): string {
   switch (role) {
-    case HRIS_ROLES.SUPER_ADMIN: return 'System-wide overview across all tenants and modules';
+    case HRIS_ROLES.SUPER_ADMIN: return 'Overview of all organizations and connected HR services';
     case HRIS_ROLES.TENANT_ADMIN: return 'Full organization overview with all HR modules';
     case HRIS_ROLES.HR_MANAGER: return 'Staff records, performance appraisals, and leave management';
     case HRIS_ROLES.LINE_MANAGER: return 'Your team members, pending approvals, and reviews';
@@ -332,7 +332,10 @@ export const DashboardPage: React.FC = () => {
         <div className="card">
           <div className="mb-4 flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-gray-900">SRMS Tenant Organizations</h3>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Organizations registered with HRIS</h3>
+                <p className="mt-1 text-xs text-gray-500" title="This list combines approved organizations from Staff Records, Performance Appraisal and other connected HR services.">Approved organizations available across the connected HR services.</p>
+              </div>
             </div>
             <div className="flex items-center gap-2 text-xs text-gray-600">
               <span className="rounded-full bg-gray-100 px-2 py-0.5">Total {data.superadmin.tenant_summary.total}</span>

@@ -18,6 +18,24 @@ export const httpClient = axios.create({
   withCredentials: true,
 });
 
+let refreshPromise: Promise<void> | null = null;
+
+export function refreshSsoSession(): Promise<void> {
+  if (refreshPromise) return refreshPromise;
+  const csrfToken = getCookieValue('hris_csrf_token');
+  refreshPromise = axios.post(
+    `${baseURL}/auth/sso/refresh`,
+    undefined,
+    {
+      withCredentials: true,
+      headers: csrfToken ? { [csrfHeaderName]: csrfToken } : {},
+    },
+  ).then(() => undefined).finally(() => {
+    refreshPromise = null;
+  });
+  return refreshPromise;
+}
+
 httpClient.interceptors.request.use(async (config) => {
   if ((config.method || 'get').toLowerCase() !== 'get') {
     const csrfToken = getCookieValue('hris_csrf_token');
@@ -64,15 +82,7 @@ httpClient.interceptors.response.use(
 
     originalRequest.__isRetryRequest = true;
     try {
-      const csrfToken = getCookieValue('hris_csrf_token');
-      await axios.post(
-        `${baseURL}/auth/sso/refresh`,
-        undefined,
-        {
-          withCredentials: true,
-          headers: csrfToken ? { [csrfHeaderName]: csrfToken } : {},
-        },
-      );
+      await refreshSsoSession();
       return httpClient(originalRequest);
     } catch (refreshError) {
       return Promise.reject(refreshError);

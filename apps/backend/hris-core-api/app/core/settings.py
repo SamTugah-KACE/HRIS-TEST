@@ -1,6 +1,7 @@
 from functools import lru_cache
 import json
 from typing import Optional
+from urllib.parse import urlparse
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
@@ -9,8 +10,57 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = Field("HRIS Core API", alias="APP_NAME")
     app_env: str = Field("development", alias="APP_ENV")
+    data_source_mode: str = Field("production", alias="HRIS_DATA_SOURCE_MODE")
 
     auth_mode: str = Field("keycloak", alias="AUTH_MODE")
+
+    # Deployment topology and typed component controls. Legacy feature flags
+    # remain supported while callers migrate to the central capability registry.
+    deployment_mode: str = Field("single", alias="HRIS_DEPLOYMENT_MODE")
+    allow_single_node_production: bool = Field(False, alias="HRIS_ALLOW_SINGLE_NODE_PRODUCTION")
+    component_primary_database_mode: str = Field("required", alias="HRIS_COMPONENT_PRIMARY_DATABASE_MODE")
+    component_tenant_registry_mode: str = Field("required", alias="HRIS_COMPONENT_TENANT_REGISTRY_MODE")
+    component_keycloak_mode: str = Field("required", alias="HRIS_COMPONENT_KEYCLOAK_MODE")
+    component_audit_log_mode: str = Field("required", alias="HRIS_COMPONENT_AUDIT_LOG_MODE")
+    component_redis_mode: str = Field("optional", alias="HRIS_COMPONENT_REDIS_MODE")
+    component_background_workers_mode: str = Field("optional", alias="HRIS_COMPONENT_BACKGROUND_WORKERS_MODE")
+    component_scheduler_mode: str = Field("optional", alias="HRIS_COMPONENT_SCHEDULER_MODE")
+    component_srms_mode: str = Field("optional", alias="HRIS_COMPONENT_SRMS_MODE")
+    component_eappraisal_mode: str = Field("optional", alias="HRIS_COMPONENT_EAPPRAISAL_MODE")
+    component_eleave_mode: str = Field("disabled", alias="HRIS_COMPONENT_ELEAVE_MODE")
+    component_sms_mode: str = Field("disabled", alias="HRIS_COMPONENT_SMS_MODE")
+    component_email_mode: str = Field("optional", alias="HRIS_COMPONENT_EMAIL_MODE")
+    component_sharding_mode: str = Field("disabled", alias="HRIS_COMPONENT_DATABASE_SHARDING_MODE")
+    component_shard_router_mode: str = Field("optional", alias="HRIS_COMPONENT_SHARD_ROUTER_MODE")
+    component_metrics_mode: str = Field("optional", alias="HRIS_COMPONENT_METRICS_MODE")
+    component_tracing_mode: str = Field("disabled", alias="HRIS_COMPONENT_TRACING_MODE")
+    component_network_monitoring_mode: str = Field("disabled", alias="HRIS_COMPONENT_NETWORK_MONITORING_MODE")
+
+    auth_jwks_cache_ttl_seconds: int = Field(900, alias="AUTH_JWKS_CACHE_TTL_SECONDS")
+    auth_jwks_cache_max_stale_seconds: int = Field(3600, alias="AUTH_JWKS_CACHE_MAX_STALE_SECONDS")
+    auth_jwks_last_good_path: str = Field("data/auth/jwks-last-good.json", alias="AUTH_JWKS_LAST_GOOD_PATH")
+    auth_recovery_mode: str = Field("disabled", alias="HRIS_AUTH_RECOVERY_MODE")
+    auth_recovery_manual_active: bool = Field(False, alias="HRIS_AUTH_RECOVERY_MANUAL_ACTIVE")
+    auth_recovery_employee_otp_enabled: bool = Field(True, alias="HRIS_AUTH_RECOVERY_EMPLOYEE_OTP_ENABLED")
+    auth_recovery_privileged_second_factor_required: bool = Field(True, alias="HRIS_AUTH_RECOVERY_PRIVILEGED_SECOND_FACTOR_REQUIRED")
+    auth_recovery_otp_length: int = Field(6, alias="HRIS_AUTH_RECOVERY_OTP_LENGTH")
+    auth_recovery_otp_ttl_seconds: int = Field(300, alias="HRIS_AUTH_RECOVERY_OTP_TTL_SECONDS")
+    auth_recovery_max_attempts: int = Field(5, alias="HRIS_AUTH_RECOVERY_MAX_ATTEMPTS")
+    auth_recovery_resend_seconds: int = Field(60, alias="HRIS_AUTH_RECOVERY_RESEND_SECONDS")
+    auth_recovery_session_ttl_seconds: int = Field(900, alias="HRIS_AUTH_RECOVERY_SESSION_TTL_SECONDS")
+    auth_recovery_pepper: Optional[str] = Field(None, alias="HRIS_AUTH_RECOVERY_PEPPER")
+    keycloak_health_urls: str = Field("", alias="KEYCLOAK_HEALTH_URLS")
+    auth_recovery_failure_threshold: int = Field(3, alias="HRIS_AUTH_RECOVERY_FAILURE_THRESHOLD")
+    auth_recovery_stabilization_seconds: int = Field(120, alias="HRIS_AUTH_RECOVERY_STABILIZATION_SECONDS")
+
+    provider_secret_encryption_key: Optional[str] = Field(None, alias="PROVIDER_SECRET_ENCRYPTION_KEY")
+    arkesel_api_base_url: str = Field("https://sms.arkesel.com", alias="ARKESEL_API_BASE_URL")
+    arkesel_api_key: Optional[str] = Field(None, alias="ARKESEL_API_KEY")
+    arkesel_sender_id: str = Field("HRIS", alias="ARKESEL_SENDER_ID")
+    arkesel_timeout_seconds: int = Field(8, alias="ARKESEL_TIMEOUT_SECONDS")
+
+    platform_base_domain: str = Field("hris.local", alias="HRIS_PLATFORM_BASE_DOMAIN")
+    trusted_hostnames: str = Field("localhost,127.0.0.1", alias="HRIS_TRUSTED_HOSTNAMES")
 
     dev_default_tenant_id: Optional[str] = Field(
         "11111111-1111-1111-1111-111111111111", alias="DEV_DEFAULT_TENANT_ID"
@@ -47,6 +97,7 @@ class Settings(BaseSettings):
     auth_cookie_access_max_age_seconds: int = Field(300, alias="AUTH_COOKIE_ACCESS_MAX_AGE_SECONDS")
     auth_cookie_refresh_max_age_seconds: int = Field(60 * 60 * 8, alias="AUTH_COOKIE_REFRESH_MAX_AGE_SECONDS")
     auth_state_secret: Optional[str] = Field(None, alias="AUTH_STATE_SECRET")
+    auth_session_encryption_key: Optional[str] = Field(None, alias="AUTH_SESSION_ENCRYPTION_KEY")
     auth_state_ttl_seconds: int = Field(300, alias="AUTH_STATE_TTL_SECONDS")
     auth_csrf_enabled: bool = Field(True, alias="AUTH_CSRF_ENABLED")
     auth_csrf_cookie_name: str = Field("hris_csrf_token", alias="AUTH_CSRF_COOKIE_NAME")
@@ -168,6 +219,9 @@ class Settings(BaseSettings):
         500, alias="STARTUP_TENANT_INVENTORY_MAX_RECORDS"
     )
     tenant_reconciliation_aliases_json: str = Field("{}", alias="TENANT_RECONCILIATION_ALIASES_JSON")
+    tenant_federation_require_second_superadmin: bool = Field(
+        False, alias="TENANT_FEDERATION_REQUIRE_SECOND_SUPERADMIN"
+    )
     enable_auto_provision: bool = Field(False, alias="ENABLE_AUTO_PROVISION")
     auto_provision_dry_run: bool = Field(True, alias="AUTO_PROVISION_DRY_RUN")
     auto_provision_allowed_modules: str = Field(
@@ -359,12 +413,86 @@ class Settings(BaseSettings):
         normalized_env = (self.app_env or "development").strip().lower()
         if normalized_env not in allowed_envs:
             raise ValueError("APP_ENV must be one of: development, staging, production, test")
+        data_source_mode = str(self.data_source_mode or "production").strip().lower()
+        if data_source_mode not in {"production", "test"}:
+            raise ValueError("HRIS_DATA_SOURCE_MODE must be one of: production, test")
+        if normalized_env != "test" and data_source_mode != "production":
+            raise ValueError("Development and production runtime must use HRIS_DATA_SOURCE_MODE=production")
         if normalized_env != "test" and self.use_stub_data:
             raise ValueError("USE_STUB_DATA=true is no longer supported for product runtime")
         if normalized_env != "test" and self.auth_mode != "keycloak":
             raise ValueError("AUTH_MODE must be keycloak for production-like runtime")
         if normalized_env != "test" and (self.eappraisal_fixture_file or "").strip():
             raise ValueError("EAPPRAISAL_FIXTURE_FILE is test-only and cannot be used in product runtime")
+        if data_source_mode == "production":
+            production_sources = {
+                "SRMS_BASE_URL": self.srms_base_url,
+                "EAPPRAISAL_INTEGRATION_BASE_URL": self.eappraisal_integration_base_url,
+            }
+            for name, value in production_sources.items():
+                parsed = urlparse(str(value or ""))
+                if parsed.scheme != "https" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1"}:
+                    raise ValueError(f"{name} must be an absolute production HTTPS URL when HRIS_DATA_SOURCE_MODE=production")
+
+        deployment_mode = str(self.deployment_mode or "single").strip().lower()
+        if deployment_mode not in {"single", "ha"}:
+            raise ValueError("HRIS_DEPLOYMENT_MODE must be one of: single, ha")
+        if normalized_env == "production" and deployment_mode == "single" and not self.allow_single_node_production:
+            raise ValueError(
+                "Production single-node mode is blocked; use HRIS_DEPLOYMENT_MODE=ha or explicitly set "
+                "HRIS_ALLOW_SINGLE_NODE_PRODUCTION=true after accepting the availability risk"
+            )
+        component_modes = {
+            "PRIMARY_DATABASE": self.component_primary_database_mode,
+            "TENANT_REGISTRY": self.component_tenant_registry_mode,
+            "KEYCLOAK": self.component_keycloak_mode,
+            "AUDIT_LOG": self.component_audit_log_mode,
+            "REDIS": self.component_redis_mode,
+            "BACKGROUND_WORKERS": self.component_background_workers_mode,
+            "SCHEDULER": self.component_scheduler_mode,
+            "SRMS": self.component_srms_mode,
+            "EAPPRAISAL": self.component_eappraisal_mode,
+            "ELEAVE": self.component_eleave_mode,
+            "SMS": self.component_sms_mode,
+            "EMAIL": self.component_email_mode,
+            "DATABASE_SHARDING": self.component_sharding_mode,
+            "SHARD_ROUTER": self.component_shard_router_mode,
+            "METRICS": self.component_metrics_mode,
+            "TRACING": self.component_tracing_mode,
+            "NETWORK_MONITORING": self.component_network_monitoring_mode,
+        }
+        invalid_modes = {name: value for name, value in component_modes.items() if str(value).strip().lower() not in {"disabled", "optional", "required"}}
+        if invalid_modes:
+            raise ValueError(f"Invalid HRIS component mode(s): {invalid_modes}")
+        if normalized_env == "production":
+            for mandatory in ("PRIMARY_DATABASE", "TENANT_REGISTRY", "KEYCLOAK", "AUDIT_LOG"):
+                if str(component_modes[mandatory]).strip().lower() != "required":
+                    raise ValueError(f"HRIS_COMPONENT_{mandatory}_MODE must be required in production")
+        if str(self.component_sharding_mode).strip().lower() == "required" and str(self.component_shard_router_mode).strip().lower() == "disabled":
+            raise ValueError("DATABASE_SHARDING cannot be required while SHARD_ROUTER is disabled")
+        if self.auth_jwks_cache_ttl_seconds < 30:
+            raise ValueError("AUTH_JWKS_CACHE_TTL_SECONDS must be at least 30")
+        if self.auth_jwks_cache_max_stale_seconds < self.auth_jwks_cache_ttl_seconds:
+            raise ValueError("AUTH_JWKS_CACHE_MAX_STALE_SECONDS must be >= AUTH_JWKS_CACHE_TTL_SECONDS")
+        recovery_mode = str(self.auth_recovery_mode or "disabled").strip().lower()
+        if recovery_mode not in {"disabled", "automatic", "manual"}:
+            raise ValueError("HRIS_AUTH_RECOVERY_MODE must be one of: disabled, automatic, manual")
+        if not 6 <= self.auth_recovery_otp_length <= 10:
+            raise ValueError("HRIS_AUTH_RECOVERY_OTP_LENGTH must be between 6 and 10")
+        if self.auth_recovery_otp_ttl_seconds < 60 or self.auth_recovery_session_ttl_seconds < 60:
+            raise ValueError("Recovery OTP and session TTLs must be at least 60 seconds")
+        if self.auth_recovery_max_attempts < 1 or self.auth_recovery_resend_seconds < 1:
+            raise ValueError("Recovery attempts and resend interval must be positive")
+        if self.auth_recovery_failure_threshold < 2:
+            raise ValueError("HRIS_AUTH_RECOVERY_FAILURE_THRESHOLD must be at least 2")
+        if self.auth_recovery_stabilization_seconds < 30:
+            raise ValueError("HRIS_AUTH_RECOVERY_STABILIZATION_SECONDS must be at least 30")
+        if len(str(self.arkesel_sender_id or "")) > 11:
+            raise ValueError("ARKESEL_SENDER_ID must not exceed 11 characters")
+        if normalized_env == "production" and recovery_mode != "disabled" and not (self.auth_recovery_pepper or "").strip():
+            raise ValueError("HRIS_AUTH_RECOVERY_PEPPER is required when recovery authentication is enabled in production")
+        if normalized_env == "production" and not (self.auth_session_encryption_key or "").strip():
+            raise ValueError("AUTH_SESSION_ENCRYPTION_KEY is required for encrypted server-side sessions in production")
 
         allowed_samesite = {"lax", "strict", "none"}
         normalized_samesite = self.auth_cookie_samesite.lower().strip()

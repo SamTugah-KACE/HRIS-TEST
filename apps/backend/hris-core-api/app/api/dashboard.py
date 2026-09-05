@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, Request
 
 from app.core.auth import AuthenticatedUser, get_current_user
-from app.services.tenant_registry_client import get_tenant_mapping
+from app.services.tenant_registry_client import get_tenant_mapping, list_tenant_mappings
 from app.clients import srms_client, eappraisal_client, eleave_client
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -40,15 +40,21 @@ def _build_superadmin_dashboard_summary(
     *,
     correlation_id: str,
 ):
-    organizations_payload = _safe_get(
-        lambda: srms_client.list_organizations(user.raw_token),
-        {"organizations": [], "summary": {"total": 0, "active": 0, "inactive": 0}},
-        module_name="srms.organizations",
-        tenant_id=user.tenant_id,
-        correlation_id=correlation_id,
-    )
-    organizations = organizations_payload.get("organizations", [])
-    summary = organizations_payload.get("summary", {})
+    # The Tenant Registry is the platform authority. A super-admin dashboard
+    # must not block on an optional native module or treat SRMS as canonical.
+    mappings = list_tenant_mappings(limit=1000)
+    organizations = [
+        {
+            "tenant_id": mapping.tenant_id,
+            "code": mapping.code,
+            "name": mapping.name,
+            "status": mapping.lifecycle_status,
+            "modules": mapping.modules.model_dump(),
+        }
+        for mapping in mappings
+    ]
+    active = sum(1 for row in organizations if str(row.get("status") or "").lower() == "active")
+    summary = {"total": len(organizations), "active": active, "inactive": len(organizations) - active}
 
     # Platform superadmin intentionally uses a global dashboard context.
     return {

@@ -3,7 +3,8 @@
 #
 # This switches from dev auth (no login screen) to Keycloak SSO (login required).
 # The portal serves the HRIS-native sign-in page and delegates SSO via core `/auth/sso/*`.
-# Log in with any seeded users (see README.md for credentials).
+# The realm import contains clients, roles and protocol configuration only.
+# Create users through the reviewed onboarding workflow; normal development does not seed accounts.
 
 services:
   hris-core-api:

@@ -27,7 +27,15 @@ def _record_explicit_projection(module_name: str, candidate: Dict[str, Any], sou
         return
     canonical_ids = {str(row.tenant_id) for row in list_tenant_mappings(limit=5000)}
     if canonical_id not in canonical_ids:
-        raise RuntimeError("Native tenant reports an unknown canonical_tenant_id")
+        # A module is authoritative for its own tenant identifier, but it is not
+        # authoritative for recreating the HRIS trust registry after data loss.
+        # Keep the record unclaimed until Registry backup restoration or the
+        # reviewed tenant-link proof workflow establishes the relationship.
+        automation_store.mark_native_tenant_inventory_for_review(
+            module_name=module_name,
+            native_tenant_id=_as_str(candidate.get("tenant_id")),
+        )
+        raise RuntimeError("reported_hris_tenant_id_requires_review")
     automation_store.upsert_module_projection(
         canonical_tenant_id=canonical_id,
         module_name=module_name,
@@ -172,10 +180,19 @@ def import_missing_tenants_from_srms(actor: AuthenticatedUser, *, max_records: i
                 routing_key=_as_str(candidate.get("srms_slug")) or None,
                 source_version=_as_str(org.get("identity_version") or org.get("version")) or None,
                 source_updated_at=_as_str(org.get("updated_at")) or None, metadata=org,
-                inventory_status="claimed" if explicit else "unclaimed",
+                inventory_status="unclaimed",
             )
             if explicit:
                 _record_explicit_projection("srms", candidate, org)
+                automation_store.upsert_native_tenant_inventory(
+                    module_name="srms", native_tenant_id=_as_str(candidate.get("tenant_id")),
+                    reported_canonical_tenant_id=_as_str(candidate.get("canonical_tenant_id")),
+                    display_name=_as_str(candidate.get("name")), normalized_name=_normalized_label(candidate.get("name")),
+                    routing_key=_as_str(candidate.get("srms_slug")) or None,
+                    source_version=_as_str(org.get("identity_version") or org.get("version")) or None,
+                    source_updated_at=_as_str(org.get("updated_at")) or None, metadata=org,
+                    inventory_status="claimed",
+                )
                 projections_created += 1
             elif settings.tenant_inventory_auto_create_canonical:
                 canonical_result = _auto_create_canonical_tenant("srms", candidate, org)
@@ -273,10 +290,19 @@ def import_missing_tenants_from_eappraisal(
                 routing_key=_as_str(candidate.get("eappraisal_subdomain")) or None,
                 source_version=_as_str(row.get("identity_version") or row.get("version")) or None,
                 source_updated_at=_as_str(row.get("updated_at")) or None, metadata=row,
-                inventory_status="claimed" if explicit else "unclaimed",
+                inventory_status="unclaimed",
             )
             if explicit:
                 _record_explicit_projection("eappraisal", candidate, row)
+                automation_store.upsert_native_tenant_inventory(
+                    module_name="eappraisal", native_tenant_id=_as_str(candidate.get("tenant_id")),
+                    reported_canonical_tenant_id=_as_str(candidate.get("canonical_tenant_id")),
+                    display_name=_as_str(candidate.get("name")), normalized_name=_normalized_label(candidate.get("name")),
+                    routing_key=_as_str(candidate.get("eappraisal_subdomain")) or None,
+                    source_version=_as_str(row.get("identity_version") or row.get("version")) or None,
+                    source_updated_at=_as_str(row.get("updated_at")) or None, metadata=row,
+                    inventory_status="claimed",
+                )
                 projections_created += 1
             elif settings.tenant_inventory_auto_create_canonical:
                 canonical_result = _auto_create_canonical_tenant("eappraisal", candidate, row)

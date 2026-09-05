@@ -763,7 +763,7 @@ def issue_module_handoff(
         settings=settings,
     )
     logger.info(
-        "Issued module handoff launch token",
+        "Issued opaque module handoff code",
         extra={
             "correlation_id": getattr(request.state, "correlation_id", ""),
             "tenant_id": mapping.tenant_id,
@@ -807,7 +807,7 @@ def redeem_module_handoff(
         tenant_id=str(payload.tenant_id or ""),
     )
     logger.info(
-        "Redeemed module handoff token",
+        "Redeemed opaque module handoff code",
         extra={
             "correlation_id": getattr(request.state, "correlation_id", ""),
             "tenant_id": redeemed.get("tenant_id"),
@@ -826,6 +826,11 @@ def redeem_module_handoff(
             "username": redeemed.get("username"),
             "email": redeemed.get("email"),
             "employee_id": redeemed.get("employee_id"),
+            "first_name": redeemed.get("first_name"),
+            "last_name": redeemed.get("last_name"),
+            "roles": redeemed.get("roles") or [],
+            "effective_role": redeemed.get("effective_role"),
+            "auth_context": redeemed.get("auth_context") or "normal",
         },
     }
 

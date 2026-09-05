@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { createModuleHandoffLaunch } from '../api/hrisCoreClient';
 
 export type ModuleTokenResult = {
-  token: string;
+  code: string;
   tenantSlug: string;
   moduleOrigin: string;
   expiresAt: number;
@@ -15,13 +15,14 @@ export type UseModuleTokenReturn = {
 };
 
 /**
- * Fetches a short-lived HRIS handoff JWT for the given module.
+ * Fetches a short-lived, random, single-use HRIS handoff code.
  *
  * The handoff endpoint returns a launch_url of the form:
- *   {module_origin}/{tenant_slug}/dashboard?hris_handoff={JWT}
+ *   {module_origin}/{tenant_slug}/dashboard?hris_handoff={OPAQUE_CODE}
  *
- * We extract the JWT and tenant slug from that URL and return them
- * so ModuleFrame can relay them to the module iFrame via postMessage.
+ * The value contains no identity claims. The module must send it to its own
+ * backend, which redeems it server-to-server. The browser-facing relay names
+ * this value `code`; `token` is reserved for actual authentication tokens.
  */
 export function useModuleToken(moduleId: string): UseModuleTokenReturn {
   const [isLoading, setIsLoading] = useState(false);
@@ -38,9 +39,9 @@ export function useModuleToken(moduleId: string): UseModuleTokenReturn {
       }
 
       const url = new URL(launchUrl);
-      const token = url.searchParams.get('hris_handoff') ?? '';
-      if (!token) {
-        throw new Error('No handoff token found in launch URL');
+      const code = url.searchParams.get('hris_handoff') ?? '';
+      if (!code) {
+        throw new Error('No handoff code found in launch URL');
       }
 
       // Path format: /{tenant_slug}/dashboard — first segment is the tenant slug
@@ -49,13 +50,13 @@ export function useModuleToken(moduleId: string): UseModuleTokenReturn {
       const moduleOrigin = url.origin;
 
       return {
-        token,
+        code,
         tenantSlug,
         moduleOrigin,
         expiresAt: Number(handoff.expires_at || 0),
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to fetch module token';
+      const msg = err instanceof Error ? err.message : 'Failed to fetch module handoff code';
       setError(msg);
       return null;
     } finally {

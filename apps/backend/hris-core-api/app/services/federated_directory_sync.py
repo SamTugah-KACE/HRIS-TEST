@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.clients import eappraisal_client, srms_client
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
-from app.services.keycloak_provisioning import ensure_user_and_temp_password
+from app.services.keycloak_provisioning import ensure_user_and_temp_password, set_user_enabled_by_username
 from app.services import automation_store
 from app.services.tenant_registry_client import get_tenant_mapping, list_tenant_mappings
 
@@ -72,6 +72,17 @@ def _roles_from_federated_user(user: Dict[str, Any]) -> List[str]:
     precedence = ["hris:tenant_admin", "hris:hr_manager", "hris:line_manager", "hris:employee"]
     mapped = {aliases[value] for value in role_values if value in aliases}
     return [role for role in precedence if role in mapped] or ["hris:employee"]
+
+
+def _federated_user_is_active(user: Dict[str, Any]) -> bool:
+    """Fail closed when any linked native account explicitly says it is inactive."""
+    sources = user.get("sources") if isinstance(user.get("sources"), dict) else {}
+    claims = [
+        source.get("claims")
+        for source in sources.values()
+        if isinstance(source, dict) and isinstance(source.get("claims"), dict)
+    ]
+    return bool(claims) and all(bool(claim.get("is_active", True)) for claim in claims)
 
 
 def _srms_effective_token(actor: AuthenticatedUser) -> Optional[str]:
@@ -420,10 +431,21 @@ def sync_keycloak_from_federated_directory(
 
     tenants = snapshot_global.get("tenants", []) if isinstance(snapshot_global, dict) else []
     tenants = [row for row in tenants if isinstance(row, dict)]
+    # Keycloak accounts are global by email. Never disable a shared account when
+    # the same principal is still active in another canonical tenant; tenant-level
+    # denial is handled by canonical membership enforcement.
+    globally_active_usernames = {
+        _norm_email(user.get("email"))
+        for tenant_row in tenants
+        for user in (tenant_row.get("users_sample", []) if isinstance(tenant_row.get("users_sample"), list) else [])
+        if isinstance(user, dict) and _federated_user_is_active(user) and _norm_email(user.get("email"))
+    }
 
     processed_users = 0
     created_count = 0
     existing_count = 0
+    native_inactive_count = 0
+    keycloak_disabled_count = 0
     skipped_missing_email = 0
     skipped_no_temporary_password = 0
     failed_count = 0
@@ -466,6 +488,41 @@ def sync_keycloak_from_federated_directory(
                 results.append(
                     {"tenant_id": t_id, "status": "skipped_missing_email", "email": "", "username": username}
                 )
+                continue
+            if not _federated_user_is_active(user):
+                native_inactive_count += 1
+                if (username or email) in globally_active_usernames:
+                    results.append({
+                        "tenant_id": t_id,
+                        "status": "native_inactive_shared_account",
+                        "email": email,
+                        "username": username,
+                        "reason": "account remains active in another canonical tenant",
+                    })
+                    continue
+                if effective_dry_run:
+                    results.append({"tenant_id": t_id, "status": "would_disable_native_inactive", "email": email, "username": username})
+                    continue
+                try:
+                    disabled = set_user_enabled_by_username(username=username or email, enabled=False)
+                    if str(disabled.get("status") or "") in {"disabled", "unchanged"}:
+                        keycloak_disabled_count += 1
+                    results.append({
+                        "tenant_id": t_id,
+                        "status": "native_inactive",
+                        "email": email,
+                        "username": username,
+                        "keycloak_status": disabled.get("status"),
+                    })
+                except Exception as exc:
+                    failed_count += 1
+                    results.append({
+                        "tenant_id": t_id,
+                        "status": "native_inactive_disable_failed",
+                        "email": email,
+                        "username": username,
+                        "error": str(exc),
+                    })
                 continue
             # Count each valid source user exactly once, regardless of whether
             # provisioning or a later email-delivery step fails.
@@ -659,6 +716,8 @@ def sync_keycloak_from_federated_directory(
         "created_count": created_count,
         "existing_count": existing_count,
         "skipped_missing_email": skipped_missing_email,
+        "native_inactive": native_inactive_count,
+        "keycloak_disabled": keycloak_disabled_count,
         "skipped_no_temporary_password": skipped_no_temporary_password,
         "failed_count": failed_count,
         "welcome_emails_sent": welcome_emails_sent,

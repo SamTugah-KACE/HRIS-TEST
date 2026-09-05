@@ -1,4 +1,6 @@
 import logging
+import json
+from datetime import datetime, timezone
 import re
 from typing import Any
 
@@ -22,6 +24,25 @@ class SafeDevelopmentFormatter(logging.Formatter):
         return f"{rendered} {' '.join(extras)}".rstrip()
 
 
+class SafeJsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        message = _SENSITIVE.sub(r"\1=<redacted>", record.getMessage())
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "stream": getattr(record, "log_stream", "platform_system"),
+            "message": message,
+        }
+        for key in _EXTRA_KEYS + ("method", "route", "actor_id", "actor_role", "resource_type", "resource_id", "outcome"):
+            value = getattr(record, key, None)
+            if value not in (None, ""):
+                payload[key] = value
+        if record.exc_info:
+            payload["exception_type"] = record.exc_info[0].__name__ if record.exc_info[0] else "Exception"
+        return json.dumps(payload, ensure_ascii=True, default=str)
+
+
 def configure_logging(app_env: str) -> None:
     """Verbose, sanitized diagnostics in development; normal INFO elsewhere."""
     development = str(app_env or "").strip().lower() == "development"
@@ -31,10 +52,10 @@ def configure_logging(app_env: str) -> None:
         "%(asctime)s %(levelname)s %(name)s %(message)s" if development
         else "%(levelname)s %(name)s %(message)s"
     )
+    json_formatter = SafeJsonFormatter()
     for handler in root.handlers:
         handler.setLevel(logging.DEBUG if development else logging.INFO)
-        if development:
-            handler.setFormatter(formatter)
+        handler.setFormatter(formatter if development else json_formatter)
     # Avoid dumping HTTP wire data (including headers) even in development.
     logging.getLogger("httpcore").setLevel(logging.INFO)
     logging.getLogger("httpx").setLevel(logging.INFO)

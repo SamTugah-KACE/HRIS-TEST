@@ -153,6 +153,19 @@ def _init_if_needed() -> None:
                 )
                 cur.execute(
                     f"""
+                    CREATE TABLE IF NOT EXISTS {_table('module_handoff_codes')} (
+                        code_hash TEXT PRIMARY KEY,
+                        module_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        payload_json JSONB NOT NULL,
+                        consumed_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
                     CREATE TABLE IF NOT EXISTS {_table('drift_snapshots')} (
                         id BIGSERIAL PRIMARY KEY,
                         scope TEXT NOT NULL,
@@ -388,6 +401,104 @@ def _init_if_needed() -> None:
                     )
                     """
                 )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_table('auth_sessions')} (
+                        session_hash TEXT PRIMARY KEY,
+                        token_ciphertext TEXT NOT NULL,
+                        subject TEXT,
+                        tenant_id TEXT,
+                        refresh_fingerprint TEXT,
+                        user_agent_hash TEXT,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        last_seen_at TIMESTAMPTZ NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        revoked_at TIMESTAMPTZ
+                    )
+                    """
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS auth_sessions_expiry_idx ON {_table('auth_sessions')} (expires_at)"
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('recovery_directory')} (
+                        user_id TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        role_class TEXT NOT NULL,
+                        active BOOLEAN NOT NULL DEFAULT TRUE,
+                        lookup_hashes_json JSONB NOT NULL,
+                        phone_ciphertext TEXT,
+                        email_ciphertext TEXT,
+                        phone_verified_at TIMESTAMPTZ,
+                        email_verified_at TIMESTAMPTZ,
+                        second_factor_enrolled BOOLEAN NOT NULL DEFAULT FALSE,
+                        updated_at TIMESTAMPTZ NOT NULL
+                    )"""
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('recovery_challenges')} (
+                        challenge_hash TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        tenant_id TEXT,
+                        provider TEXT,
+                        destination_ciphertext TEXT,
+                        provider_reference TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        consumed_at TIMESTAMPTZ
+                    )"""
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('recovery_sessions')} (
+                        session_hash TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        tenant_id TEXT NOT NULL,
+                        username TEXT NOT NULL,
+                        role_class TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        revoked_at TIMESTAMPTZ
+                    )"""
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('tenant_domains')} (
+                        hostname TEXT PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        domain_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        verification_hash TEXT,
+                        redirect_hostname TEXT,
+                        created_at TIMESTAMPTZ NOT NULL,
+                        verified_at TIMESTAMPTZ,
+                        updated_at TIMESTAMPTZ NOT NULL
+                    )"""
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS tenant_domains_tenant_idx ON {_table('tenant_domains')} (tenant_id,status)"
+                )
+                cur.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {_table('tenant_activity_audit')} (
+                        id BIGSERIAL PRIMARY KEY,
+                        tenant_id TEXT NOT NULL,
+                        actor_id TEXT,
+                        actor_role TEXT,
+                        action TEXT NOT NULL,
+                        resource_type TEXT,
+                        resource_id TEXT,
+                        outcome TEXT NOT NULL,
+                        correlation_id TEXT,
+                        detail_json JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        previous_hash TEXT,
+                        integrity_hash TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL
+                    )"""
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS tenant_activity_audit_query_idx ON {_table('tenant_activity_audit')} (tenant_id,created_at DESC)"
+                )
             conn.commit()
         _INITIALIZED = True
 
@@ -405,6 +516,256 @@ def ensure_ready() -> None:
     Safe to call repeatedly.
     """
     _init_if_needed()
+
+
+def create_auth_session(
+    *, session_hash: str, token_ciphertext: str, subject: Optional[str], tenant_id: Optional[str],
+    refresh_fingerprint: Optional[str], user_agent_hash: Optional[str], expires_at: str,
+) -> None:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        conn.execute(f"DELETE FROM {_table('auth_sessions')} WHERE expires_at <= NOW() OR revoked_at IS NOT NULL")
+        conn.execute(
+            f"""INSERT INTO {_table('auth_sessions')}
+            (session_hash,token_ciphertext,subject,tenant_id,refresh_fingerprint,user_agent_hash,created_at,last_seen_at,expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (session_hash, token_ciphertext, subject, tenant_id, refresh_fingerprint, user_agent_hash, now, now, expires_at),
+        )
+        conn.commit()
+
+
+def get_auth_session(*, session_hash: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT * FROM {_table('auth_sessions')}
+            WHERE session_hash=%s AND revoked_at IS NULL AND expires_at > NOW()""",
+            (session_hash,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                f"UPDATE {_table('auth_sessions')} SET last_seen_at=%s WHERE session_hash=%s",
+                (_utc_now(), session_hash),
+            )
+            conn.commit()
+    return dict(row) if row else None
+
+
+def revoke_auth_session(*, session_hash: str) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE {_table('auth_sessions')} SET revoked_at=%s WHERE session_hash=%s",
+            (_utc_now(), session_hash),
+        )
+        conn.commit()
+
+
+def upsert_recovery_user(*, row: Dict[str, Any]) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('recovery_directory')}
+            (user_id,tenant_id,username,role_class,active,lookup_hashes_json,phone_ciphertext,email_ciphertext,
+             phone_verified_at,email_verified_at,second_factor_enrolled,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(user_id) DO UPDATE SET
+              tenant_id=excluded.tenant_id,username=excluded.username,role_class=excluded.role_class,
+              active=excluded.active,lookup_hashes_json=excluded.lookup_hashes_json,
+              phone_ciphertext=excluded.phone_ciphertext,email_ciphertext=excluded.email_ciphertext,
+              phone_verified_at=excluded.phone_verified_at,email_verified_at=excluded.email_verified_at,
+              second_factor_enrolled=excluded.second_factor_enrolled,updated_at=excluded.updated_at""",
+            (
+                row["user_id"], row["tenant_id"], row["username"], row["role_class"], bool(row.get("active", True)),
+                _json(row.get("lookup_hashes", [])), row.get("phone_ciphertext"), row.get("email_ciphertext"),
+                row.get("phone_verified_at"), row.get("email_verified_at"), bool(row.get("second_factor_enrolled")), _utc_now(),
+            ),
+        )
+        conn.commit()
+
+
+def find_recovery_user(*, lookup_hash: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT * FROM {_table('recovery_directory')}
+            WHERE active=TRUE AND lookup_hashes_json ? %s LIMIT 1""",
+            (lookup_hash,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_recovery_user_by_id(*, user_id: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT * FROM {_table('recovery_directory')} WHERE user_id=%s AND active=TRUE",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_recovery_challenge(*, row: Dict[str, Any]) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        if row.get("user_id"):
+            conn.execute(
+                f"UPDATE {_table('recovery_challenges')} SET status='superseded' WHERE user_id=%s AND status='pending'",
+                (row["user_id"],),
+            )
+        conn.execute(
+            f"""INSERT INTO {_table('recovery_challenges')}
+            (challenge_hash,user_id,tenant_id,provider,destination_ciphertext,provider_reference,attempts,status,created_at,expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s,0,'pending',%s,%s)""",
+            (row["challenge_hash"], row.get("user_id"), row.get("tenant_id"), row.get("provider"),
+             row.get("destination_ciphertext"), row.get("provider_reference"), _utc_now(), row["expires_at"]),
+        )
+        conn.commit()
+
+
+def get_recovery_challenge(*, challenge_hash: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT * FROM {_table('recovery_challenges')}
+            WHERE challenge_hash=%s AND status='pending' AND expires_at > NOW()""",
+            (challenge_hash,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def increment_recovery_attempt(*, challenge_hash: str, consume: bool = False) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"""UPDATE {_table('recovery_challenges')}
+            SET attempts=attempts+1,status=CASE WHEN %s THEN 'consumed' ELSE status END,
+                consumed_at=CASE WHEN %s THEN %s::timestamptz ELSE consumed_at END
+            WHERE challenge_hash=%s""",
+            (consume, consume, _utc_now(), challenge_hash),
+        )
+        conn.commit()
+
+
+def create_recovery_session(*, row: Dict[str, Any]) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('recovery_sessions')}
+            (session_hash,user_id,tenant_id,username,role_class,created_at,expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (row["session_hash"],row["user_id"],row["tenant_id"],row["username"],row["role_class"],_utc_now(),row["expires_at"]),
+        )
+        conn.commit()
+
+
+def get_recovery_session(*, session_hash: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""SELECT * FROM {_table('recovery_sessions')}
+            WHERE session_hash=%s AND revoked_at IS NULL AND expires_at > NOW()""",
+            (session_hash,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_recovery_session(*, session_hash: str) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE {_table('recovery_sessions')} SET revoked_at=%s WHERE session_hash=%s",
+            (_utc_now(), session_hash),
+        )
+        conn.commit()
+
+
+def upsert_tenant_domain(*, hostname: str, tenant_id: str, domain_type: str, status: str, verification_hash: Optional[str]) -> None:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        conn.execute(
+            f"""INSERT INTO {_table('tenant_domains')}
+            (hostname,tenant_id,domain_type,status,verification_hash,created_at,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(hostname) DO UPDATE SET tenant_id=excluded.tenant_id,domain_type=excluded.domain_type,
+              status=excluded.status,verification_hash=excluded.verification_hash,updated_at=excluded.updated_at""",
+            (hostname,tenant_id,domain_type,status,verification_hash,now,now),
+        )
+        conn.commit()
+
+
+def verify_tenant_domain(*, hostname: str) -> None:
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE {_table('tenant_domains')} SET status='verified',verified_at=%s,updated_at=%s WHERE hostname=%s",
+            (_utc_now(),_utc_now(),hostname),
+        )
+        conn.commit()
+
+
+def get_tenant_domain(*, hostname: str) -> Optional[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT * FROM {_table('tenant_domains')} WHERE hostname=%s",
+            (hostname,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_tenant_domains(*, tenant_id: str) -> list[Dict[str, Any]]:
+    _init_if_needed()
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT hostname,domain_type,status,redirect_hostname,created_at,verified_at,updated_at FROM {_table('tenant_domains')} WHERE tenant_id=%s ORDER BY created_at",
+            (tenant_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def append_tenant_audit(*, row: Dict[str, Any]) -> Dict[str, Any]:
+    _init_if_needed()
+    now = _utc_now()
+    with _connect() as conn:
+        previous = conn.execute(
+            f"SELECT integrity_hash FROM {_table('tenant_activity_audit')} WHERE tenant_id=%s ORDER BY id DESC LIMIT 1 FOR UPDATE",
+            (row["tenant_id"],),
+        ).fetchone()
+        previous_hash = str((previous or {}).get("integrity_hash") or "")
+        canonical = _json({
+            "tenant_id": row["tenant_id"], "actor_id": row.get("actor_id"), "action": row["action"],
+            "resource_type": row.get("resource_type"), "resource_id": row.get("resource_id"),
+            "outcome": row.get("outcome", "success"), "correlation_id": row.get("correlation_id"),
+            "detail": row.get("detail", {}), "created_at": now, "previous_hash": previous_hash,
+        })
+        import hashlib
+        integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        inserted = conn.execute(
+            f"""INSERT INTO {_table('tenant_activity_audit')}
+            (tenant_id,actor_id,actor_role,action,resource_type,resource_id,outcome,correlation_id,detail_json,previous_hash,integrity_hash,created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s) RETURNING id""",
+            (row["tenant_id"],row.get("actor_id"),row.get("actor_role"),row["action"],row.get("resource_type"),
+             row.get("resource_id"),row.get("outcome","success"),row.get("correlation_id"),_json(row.get("detail",{})),
+             previous_hash or None,integrity_hash,now),
+        ).fetchone()
+        conn.commit()
+    return {"id": inserted["id"], "integrity_hash": integrity_hash, "created_at": now}
+
+
+def list_tenant_audit(*, tenant_id: str, limit: int = 100) -> list[Dict[str, Any]]:
+    _init_if_needed()
+    safe_limit = max(1, min(500, int(limit)))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT id,tenant_id,actor_id,actor_role,action,resource_type,resource_id,outcome,correlation_id,
+            detail_json,integrity_hash,created_at FROM {_table('tenant_activity_audit')}
+            WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s""",
+            (tenant_id,safe_limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def try_acquire_scheduler_lock(lock_key: int = 824_731_119):
@@ -1357,6 +1718,18 @@ def list_native_tenant_inventory(
     return [dict(row) for row in rows]
 
 
+def mark_native_tenant_inventory_for_review(*, module_name: str, native_tenant_id: str) -> None:
+    """Remove a stale trusted state when its canonical Registry record is absent."""
+    _init_if_needed()
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE {_table('native_tenant_inventory')} "
+            "SET inventory_status='unclaimed' WHERE module_name=%s AND native_tenant_id=%s",
+            (module_name.strip().lower(), native_tenant_id.strip()),
+        )
+        conn.commit()
+
+
 def get_module_projection(*, canonical_tenant_id: str, module_name: str) -> Optional[Dict[str, Any]]:
     _init_if_needed()
     with _connect() as conn:
@@ -1473,6 +1846,7 @@ def update_tenant_link_claim(
 
 def approve_tenant_link_claim(
     *, claim_id: str, approved_by: str, correlation_id: Optional[str], event_id: str,
+    require_second_approver: bool = True,
 ) -> Dict[str, Any]:
     """Atomically approve a native-confirmed claim and activate its projection."""
     _init_if_needed()
@@ -1487,7 +1861,7 @@ def approve_tenant_link_claim(
                 raise ValueError("claim_not_found")
             if claim["state"] != "native_confirmed":
                 raise ValueError("claim_not_native_confirmed")
-            if str(claim["initiated_by"]) == str(approved_by):
+            if require_second_approver and str(claim["initiated_by"]) == str(approved_by):
                 raise ValueError("second_approver_required")
             if claim.get("expires_at") and claim["expires_at"] <= datetime.now(timezone.utc):
                 raise ValueError("claim_expired")
@@ -1715,3 +2089,36 @@ def claim_module_handoff_jti(*, jti: str, exp: int, payload: Dict[str, Any]) -> 
         ).fetchone()
         conn.commit()
     return bool(row)
+
+
+def create_module_handoff_code(*, code_hash: str, payload: Dict[str, Any]) -> None:
+    _init_if_needed()
+    expires_at = datetime.fromtimestamp(int(payload["exp"]), timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(f"DELETE FROM {_table('module_handoff_codes')} WHERE expires_at <= NOW()")
+        conn.execute(
+            f"""INSERT INTO {_table('module_handoff_codes')}
+                (code_hash,module_id,tenant_id,expires_at,payload_json,created_at)
+                VALUES (%s,%s,%s,%s,%s,%s)""",
+            (code_hash, str(payload["aud"]), str(payload["tenant_id"]), expires_at,
+             json.dumps(payload), _utc_now()),
+        )
+        conn.commit()
+
+
+def consume_module_handoff_code(*, code_hash: str) -> Optional[Dict[str, Any]]:
+    """Atomically consume one unexpired opaque code; concurrent replays return no row."""
+    _init_if_needed()
+    with _connect() as conn:
+        row = conn.execute(
+            f"""UPDATE {_table('module_handoff_codes')}
+                SET consumed_at=%s
+                WHERE code_hash=%s AND consumed_at IS NULL AND expires_at>NOW()
+                RETURNING payload_json""",
+            (_utc_now(), code_hash),
+        ).fetchone()
+        conn.commit()
+    if not row:
+        return None
+    payload = row.get("payload_json") if isinstance(row, dict) else row[0]
+    return payload if isinstance(payload, dict) else json.loads(payload)

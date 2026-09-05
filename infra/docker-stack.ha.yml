@@ -1,0 +1,89 @@
+version: "3.9"
+
+x-api-deploy: &api_deploy
+  mode: replicated
+  update_config: {parallelism: 1, order: start-first, failure_action: rollback}
+  rollback_config: {parallelism: 1, order: stop-first}
+  restart_policy: {condition: on-failure, delay: 5s, max_attempts: 5, window: 120s}
+  placement:
+    max_replicas_per_node: 1
+
+services:
+  edge:
+    image: ${HRIS_EDGE_IMAGE:?set HRIS_EDGE_IMAGE}
+    ports: ["80:80", "443:443"]
+    networks: [edge, backend]
+    deploy:
+      <<: *api_deploy
+      replicas: ${HRIS_REPLICAS_EDGE:-2}
+
+  portal:
+    image: ${HRIS_PORTAL_IMAGE:?set HRIS_PORTAL_IMAGE}
+    networks: [backend]
+    deploy:
+      <<: *api_deploy
+      replicas: ${HRIS_REPLICAS_PORTAL:-2}
+
+  hris-core-api:
+    image: ${HRIS_CORE_API_IMAGE:?set HRIS_CORE_API_IMAGE}
+    networks: [backend]
+    environment:
+      APP_ENV: production
+      HRIS_DEPLOYMENT_MODE: ha
+      AUTH_MODE: keycloak
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_SESSION_ENCRYPTION_KEY: ${HRIS_AUTH_SESSION_ENCRYPTION_KEY:?inject from deployment secret manager}
+      PROVIDER_SECRET_ENCRYPTION_KEY: ${HRIS_PROVIDER_SECRET_ENCRYPTION_KEY:?inject from deployment secret manager}
+      HRIS_AUTH_RECOVERY_PEPPER: ${HRIS_AUTH_RECOVERY_PEPPER:?inject from deployment secret manager}
+      AUTOMATION_STORE_DATABASE_URL: ${HRIS_AUTOMATION_STORE_DATABASE_URL:?set HA PostgreSQL URL}
+      KEYCLOAK_ISSUER: ${HRIS_KEYCLOAK_ISSUER:?set HRIS_KEYCLOAK_ISSUER}
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/hris-platform/protocol/openid-connect/certs
+      KEYCLOAK_HEALTH_URLS: http://keycloak:9000/health/ready
+      HRIS_AUTH_RECOVERY_MODE: automatic
+      HRIS_COMPONENT_DATABASE_SHARDING_MODE: ${HRIS_COMPONENT_DATABASE_SHARDING_MODE:-disabled}
+      HRIS_COMPONENT_ELEAVE_MODE: ${HRIS_COMPONENT_ELEAVE_MODE:-disabled}
+      HRIS_COMPONENT_SMS_MODE: ${HRIS_COMPONENT_SMS_MODE:-optional}
+    deploy:
+      <<: *api_deploy
+      replicas: ${HRIS_REPLICAS_CORE_API:-2}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  tenant-registry:
+    image: ${HRIS_TENANT_REGISTRY_IMAGE:?set HRIS_TENANT_REGISTRY_IMAGE}
+    networks: [backend]
+    environment:
+      DATABASE_URL: ${HRIS_TENANT_REGISTRY_DATABASE_URL:?set HA PostgreSQL URL}
+      INTERNAL_BASIC_AUTH_PASSWORD: ${HRIS_TENANT_REGISTRY_BASIC_AUTH_PASSWORD:?inject secret}
+    deploy:
+      <<: *api_deploy
+      replicas: ${HRIS_REPLICAS_TENANT_REGISTRY:-2}
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5.4
+    command: ["start", "--health-enabled=true", "--cache=ispn"]
+    networks: [backend]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: ${HRIS_KEYCLOAK_DATABASE_URL:?set HA PostgreSQL JDBC URL}
+      KC_DB_USERNAME: ${HRIS_KEYCLOAK_DATABASE_USERNAME:?inject secret}
+      KC_DB_PASSWORD: ${HRIS_KEYCLOAK_DATABASE_PASSWORD:?inject secret}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${HRIS_KEYCLOAK_ADMIN_PASSWORD:?inject secret}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    deploy:
+      <<: *api_deploy
+      replicas: ${HRIS_REPLICAS_KEYCLOAK:-2}
+
+networks:
+  edge:
+    driver: overlay
+    attachable: false
+  backend:
+    driver: overlay
+    encrypted: true
+    attachable: false

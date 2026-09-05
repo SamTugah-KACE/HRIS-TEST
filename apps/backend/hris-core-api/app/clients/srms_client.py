@@ -109,6 +109,14 @@ def provision_tenant(payload: Dict[str, Any]) -> Dict[str, Any]:
     return adapter.provision_tenant(payload)  # type: ignore[attr-defined]
 
 
+def activate_tenant_federation(native_tenant_id: str, canonical_tenant_id: str) -> Dict[str, Any]:
+    _require_srms_config()
+    adapter = get_srms_adapter()
+    if not hasattr(adapter, "activate_tenant_federation"):
+        raise RuntimeError("Configured SRMS adapter does not support federation activation")
+    return adapter.activate_tenant_federation(native_tenant_id, canonical_tenant_id)  # type: ignore[attr-defined]
+
+
 def list_tenant_users(
     tenant_id: str,
     token: Optional[str],

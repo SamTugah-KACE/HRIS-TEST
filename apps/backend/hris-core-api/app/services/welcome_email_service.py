@@ -50,21 +50,30 @@ def check_smtp_readiness() -> dict:
     kwargs = {"timeout": 20}
     if settings.smtp_use_ssl:
         kwargs["context"] = context
+    stage = "connect"
     try:
         with smtp_class(settings.smtp_host, settings.smtp_port, **kwargs) as server:
+            stage = "greeting"
             server.ehlo()
             if settings.smtp_use_tls:
+                stage = "starttls"
                 server.starttls(context=context)
+                stage = "post_tls_greeting"
                 server.ehlo()
             if settings.smtp_use_credentials:
                 if not (settings.smtp_username or "").strip():
                     return {"ok": False, "stage": "configuration", "reason": "smtp_username_missing"}
+                if not (settings.smtp_password or "").strip():
+                    return {"ok": False, "stage": "configuration", "reason": "smtp_password_missing"}
+                stage = "authentication"
                 server.login(settings.smtp_username, settings.smtp_password or "")
         return {"ok": True, "stage": "authenticated", "tls": bool(settings.smtp_use_tls or settings.smtp_use_ssl)}
     except smtplib.SMTPAuthenticationError:
         return {"ok": False, "stage": "authentication", "reason": "smtp_authentication_failed"}
+    except TimeoutError:
+        return {"ok": False, "stage": stage, "reason": "smtp_timeout"}
     except (smtplib.SMTPException, OSError) as exc:
-        return {"ok": False, "stage": "connection", "reason": type(exc).__name__}
+        return {"ok": False, "stage": stage, "reason": type(exc).__name__}
 
 
 def send_welcome_email(

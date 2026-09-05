@@ -1,8 +1,9 @@
 -- Create the Keycloak schema (Keycloak manages its own tables)
 CREATE SCHEMA IF NOT EXISTS keycloak;
 
--- Seed data for the Tenant Registry
--- This runs automatically on first Postgres start via docker-entrypoint-initdb.d
+-- Explicit test fixture only.
+-- Normal development and production Compose files do not mount or execute this file.
+-- Run it manually only inside a disposable test database after Registry migrations.
 
 INSERT INTO tenants (
     id, tenant_id, code, name,

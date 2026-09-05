@@ -29,7 +29,7 @@ export type ModuleFrameProps = {
   className?: string;
 };
 
-type FrameState = 'resolving' | 'loading' | 'auth_relayed' | 'error';
+type FrameState = 'resolving' | 'loading' | 'awaiting_auth' | 'auth_relayed' | 'error';
 
 type ConfirmRequest = {
   actionId: string;
@@ -132,7 +132,7 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
     iframe.contentWindow.postMessage(
       {
         type: 'HRIS_AUTH_RELAY',
-        token: result.token,
+        code: result.code,
         tenantSlug: result.tenantSlug,
         sub: user.sub,
         username: user.username,
@@ -159,7 +159,9 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
       targetOrigin,
     );
 
-    setState('auth_relayed');
+    // Posting a one-use code is not proof that the native module accepted it.
+    // Keep the iframe covered until the module confirms its session exists.
+    setState('awaiting_auth');
 
     // --- Browser back/forward restore ---
     // If the user navigated back to this module page, the previous module URL
@@ -193,6 +195,7 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
         placeholder?: string;
         avatarUrl?: string;
         displayName?: string;
+        message?: string;
       };
       if (!data?.type) return;
 
@@ -203,6 +206,16 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
             authRelayedRef.current = true;
             void relayAuth();
           }
+          break;
+
+        case 'MODULE_AUTHENTICATED':
+          setError(null);
+          setState('auth_relayed');
+          break;
+
+        case 'MODULE_AUTH_FAILED':
+          setError(data.message || 'The module could not establish your HRIS session.');
+          setState('error');
           break;
 
         // Module's short-lived token expired mid-session (got a 401 from its own API).
@@ -484,15 +497,16 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
     return () => window.removeEventListener('hris:logout', handleLogout);
   }, []);
 
-  // --- Step 7: Fallback timeout ---
+  // --- Step 7: Readiness/authentication timeout ---
   useEffect(() => {
-    if (state !== 'loading') return;
+    if (state !== 'loading' && state !== 'awaiting_auth') return;
     const timer = window.setTimeout(() => {
       setState((current) => {
-        if (current !== 'loading') return current;
-        if (moduleReadyReceived.current) return 'auth_relayed';
+        if (current !== 'loading' && current !== 'awaiting_auth') return current;
         setError(
-          `${frameLabel} is not responding. Make sure the module server is running and accessible.`,
+          moduleReadyReceived.current
+            ? `${frameLabel} did not confirm authentication. Check its tenant federation and HRIS handoff configuration.`
+            : `${frameLabel} is not responding. Make sure the module server is running and accessible.`,
         );
         return 'error';
       });
@@ -595,7 +609,7 @@ export const ModuleFrame: React.FC<ModuleFrameProps> = ({
       onCancel={() => handleConfirmResult(false)}
     />
     <div className="relative w-full">
-      {(state === 'loading' || tokenLoading) && (
+      {(state === 'loading' || state === 'awaiting_auth' || tokenLoading) && (
         <div className="absolute inset-0 z-10 bg-white dark:bg-gray-900">
           <ModuleLoadingSkeleton />
         </div>
