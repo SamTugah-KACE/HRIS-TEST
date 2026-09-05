@@ -156,6 +156,10 @@ services:
         value: https://gi-kace-hris-core-test.onrender.com/auth/sso/callback
       - key: CORS_ALLOWED_ORIGINS
         value: https://gi-kace-hris-portal-test.onrender.com
+      # Starlette rejects any Host header not present in this allowlist. Render
+      # health checks use the service's public hostname, not localhost.
+      - key: HRIS_TRUSTED_HOSTNAMES
+        value: localhost,127.0.0.1,gi-kace-hris-core-test.onrender.com
       - key: SRMS_BASE_URL
         value: https://srms.gi-kace.com.gh
       - key: EAPPRAISAL_INTEGRATION_BASE_URL
