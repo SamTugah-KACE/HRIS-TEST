@@ -20,17 +20,28 @@ export const httpClient = axios.create({
 
 let refreshPromise: Promise<void> | null = null;
 
+export async function getCsrfToken(): Promise<string | null> {
+  if (authMode !== 'keycloak') return getCookieValue('hris_csrf_token');
+  if (new URL(baseURL, window.location.href).origin === window.location.origin) {
+    return getCookieValue('hris_csrf_token');
+  }
+  const response = await axios.get(`${baseURL}/auth/sso/csrf`, {
+    withCredentials: true, timeout: 15000,
+  });
+  return response.data.csrf_token;
+}
+
 export function refreshSsoSession(): Promise<void> {
   if (refreshPromise) return refreshPromise;
-  const csrfToken = getCookieValue('hris_csrf_token');
-  refreshPromise = axios.post(
+  refreshPromise = getCsrfToken().then((csrfToken) => axios.post(
     `${baseURL}/auth/sso/refresh`,
     undefined,
     {
       withCredentials: true,
+      timeout: 15000,
       headers: csrfToken ? { [csrfHeaderName]: csrfToken } : {},
     },
-  ).then(() => undefined).finally(() => {
+  )).then(() => undefined).finally(() => {
     refreshPromise = null;
   });
   return refreshPromise;
@@ -38,7 +49,8 @@ export function refreshSsoSession(): Promise<void> {
 
 httpClient.interceptors.request.use(async (config) => {
   if ((config.method || 'get').toLowerCase() !== 'get') {
-    const csrfToken = getCookieValue('hris_csrf_token');
+    if (refreshPromise) await refreshPromise;
+    const csrfToken = await getCsrfToken();
     if (csrfToken) {
       config.headers = config.headers ?? {};
       config.headers[csrfHeaderName] = csrfToken;

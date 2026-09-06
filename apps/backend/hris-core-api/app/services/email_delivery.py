@@ -3,6 +3,8 @@ from __future__ import annotations
 from email.message import EmailMessage
 import smtplib
 import ssl
+import json
+import logging
 from typing import Optional
 
 import httpx
@@ -63,6 +65,12 @@ def send_email(*, to_email: str, subject: str, text_body: str, html_body: Option
     recipient = str(to_email or "").strip().lower()
     if not recipient:
         raise EmailDeliveryError("Recipient email is required", provider=provider)
+    if getattr(settings, "email_test_log_contents", False):
+        logging.getLogger(__name__).warning("EMAIL_TEST_CONTENTS %s", json.dumps({
+            "delivery_status": "attempt_not_delivery_confirmation",
+            "provider": provider, "to": recipient, "from": settings.smtp_from_email,
+            "subject": subject, "text": text_body, "html": html_body,
+        }, ensure_ascii=True))
     if provider == "https":
         return _send_resend(settings, recipient, subject, text_body, html_body)
     return _send_smtp(settings, recipient, subject, text_body, html_body)

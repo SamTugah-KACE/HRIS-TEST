@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import axios from 'axios';
-import { refreshSsoSession } from '../api/httpClient';
+import { refreshSsoSession, getCsrfToken } from '../api/httpClient';
 import { resolveEffectiveRole, type HrisRole, HRIS_ROLES } from './roles';
 
 const ENTERPRISE_PRIMARY_LOGO_URL = new URL('../../hris_enterprise_primary_logo.png', import.meta.url).href;
@@ -59,9 +59,9 @@ function getCookieValue(cookieName: string): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-authApi.interceptors.request.use((config) => {
+authApi.interceptors.request.use(async (config) => {
   if ((config.method || 'get').toLowerCase() !== 'get') {
-    const csrfToken = getCookieValue('hris_csrf_token');
+    const csrfToken = await getCsrfToken();
     if (csrfToken) {
       config.headers = config.headers ?? {};
       config.headers[AUTH_CSRF_HEADER_NAME] = csrfToken;
@@ -212,9 +212,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const refreshInterval = window.setInterval(async () => {
       try {
         await refreshSsoSession();
-      } catch {
-        setAuthenticated(false);
-        setUser(null);
+      } catch (error) {
+        if (axios.isAxiosError(error) && [401, 403].includes(error.response?.status ?? 0)) {
+          setAuthenticated(false);
+          setUser(null);
+        }
       }
     }, 240_000);
     return () => window.clearInterval(refreshInterval);

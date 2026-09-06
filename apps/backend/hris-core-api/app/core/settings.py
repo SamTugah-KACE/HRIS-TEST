@@ -328,6 +328,7 @@ class Settings(BaseSettings):
     email_http_api_url: str = Field("https://api.resend.com/emails", alias="EMAIL_HTTP_API_URL")
     email_http_api_key: Optional[str] = Field(None, alias="EMAIL_HTTP_API_KEY")
     email_http_timeout_seconds: int = Field(20, alias="EMAIL_HTTP_TIMEOUT_SECONDS")
+    email_test_log_contents: bool = Field(False, alias="EMAIL_TEST_LOG_CONTENTS")
     smtp_host: Optional[str] = Field(None, validation_alias=AliasChoices("SMTP_HOST", "MAIL_SERVER"))
     smtp_port: int = Field(587, validation_alias=AliasChoices("SMTP_PORT", "MAIL_PORT"))
     smtp_username: Optional[str] = Field(None, validation_alias=AliasChoices("SMTP_USERNAME", "MAIL_USERNAME"))
@@ -663,7 +664,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AUTOMATION_STORE_DATABASE_URL is required when automation persistence features are enabled"
             )
-        if self.enable_federated_keycloak_welcome_email and not (self.smtp_host or "").strip():
+        if self.enable_federated_keycloak_welcome_email and self.mail_provider.strip().lower() == "smtp" and not (self.smtp_host or "").strip():
             raise ValueError("SMTP_HOST/MAIL_SERVER is required when federated welcome email is enabled")
         if self.federated_keycloak_allow_existing_user_password_reset:
             raise ValueError(

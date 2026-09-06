@@ -395,6 +395,24 @@ def sso_session(user: AuthenticatedUser = Depends(get_current_user)):
     }
 
 
+@router.get("/csrf")
+def sso_csrf(request: Request):
+    """Expose the existing double-submit token only to an explicitly trusted UI."""
+    settings = get_settings()
+    origin = request.headers.get("origin", "")
+    allowed = {item.strip().rstrip("/") for item in settings.cors_allowed_origins.split(",") if item.strip()}
+    if not origin or origin.rstrip("/") not in allowed:
+        raise HTTPException(status_code=403, detail="Untrusted CSRF token origin")
+    session_id = str(request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if not load_session(session_id):
+        raise HTTPException(status_code=401, detail="Missing refresh session")
+    token = request.cookies.get(settings.auth_csrf_cookie_name)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing CSRF session; sign in again")
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"csrf_token": token}, headers={"Cache-Control": "no-store", "Vary": "Origin", "Pragma": "no-cache"})
+
+
 @router.post("/refresh")
 def sso_refresh(request: Request):
     settings = get_settings()

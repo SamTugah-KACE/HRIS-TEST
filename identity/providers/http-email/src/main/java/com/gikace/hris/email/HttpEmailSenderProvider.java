@@ -25,6 +25,12 @@ public final class HttpEmailSenderProvider implements EmailSenderProvider {
     @Override
     public void send(Map<String, String> config, String address, String subject,
                      String textBody, String htmlBody) throws EmailException {
+        if ("true".equalsIgnoreCase(env("EMAIL_TEST_LOG_CONTENTS", "false"))) {
+            System.getLogger(HttpEmailSenderProvider.class.getName()).log(System.Logger.Level.WARNING,
+                "EMAIL_TEST_CONTENTS {\"delivery_status\":\"attempt_not_delivery_confirmation\",\"to\":\""
+                + json(address) + "\",\"subject\":\"" + json(subject) + "\",\"text\":\""
+                + json(textBody) + "\",\"html\":\"" + json(htmlBody) + "\"}");
+        }
         String provider = env("EMAIL_HTTP_PROVIDER", "resend");
         if (!"resend".equalsIgnoreCase(provider)) throw new EmailException("Unsupported HTTPS email provider");
         String apiKey = env("EMAIL_HTTP_API_KEY", "");
