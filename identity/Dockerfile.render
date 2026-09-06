@@ -7,10 +7,19 @@ RUN mvn --batch-mode --no-transfer-progress package -DskipTests
 
 FROM quay.io/keycloak/keycloak:26.3.3 AS keycloak-build
 
-COPY --from=email-provider-build /build/target/keycloak-http-email-provider-1.0.0.jar /opt/keycloak/providers/keycloak-http-email-provider.jar
+ENV KC_DB=postgres
+ENV KC_HEALTH_ENABLED=true
+ENV KC_SPI_EMAIL_SENDER__PROVIDER=https
+
+COPY --from=email-provider-build --chown=keycloak:keycloak /build/target/keycloak-http-email-provider-1.0.0.jar /opt/keycloak/providers/keycloak-http-email-provider.jar
+RUN touch -m --date=@1743465600 /opt/keycloak/providers/keycloak-http-email-provider.jar
 RUN /opt/keycloak/bin/kc.sh build
 
 FROM quay.io/keycloak/keycloak:26.3.3
+
+ENV KC_DB=postgres
+ENV KC_HEALTH_ENABLED=true
+ENV KC_SPI_EMAIL_SENDER__PROVIDER=https
 
 COPY --from=keycloak-build /opt/keycloak/ /opt/keycloak/
 
@@ -20,4 +29,4 @@ COPY themes/hris-platform /opt/keycloak/themes/hris-platform
 EXPOSE 10000
 
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
-CMD ["start", "--import-realm", "--http-enabled=true", "--http-port=10000", "--proxy-headers=xforwarded", "--hostname-strict=false", "--health-enabled=true", "--cache=local"]
+CMD ["start", "--optimized", "--import-realm", "--http-enabled=true", "--http-port=10000", "--proxy-headers=xforwarded", "--hostname-strict=false", "--cache=local"]
