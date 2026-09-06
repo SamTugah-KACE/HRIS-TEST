@@ -1,11 +1,9 @@
-from email.message import EmailMessage
 from html import escape
-import smtplib
-import ssl
 import time
 from typing import Optional
 
 from app.core.settings import get_settings
+from app.services.email_delivery import check_email_readiness, send_email
 
 
 def _decode_template_line_breaks(value: str) -> str:
@@ -38,42 +36,8 @@ def _welcome_html(*, brand: str, tenant_name: str, portal_url: str, username: st
 
 
 def check_smtp_readiness() -> dict:
-    """Connect, negotiate TLS, and authenticate without sending a message."""
-    settings = get_settings()
-    if not settings.smtp_host:
-        return {"ok": False, "stage": "configuration", "reason": "smtp_not_configured"}
-    context = ssl.create_default_context()
-    if not settings.smtp_validate_certs:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    smtp_class = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
-    kwargs = {"timeout": 20}
-    if settings.smtp_use_ssl:
-        kwargs["context"] = context
-    stage = "connect"
-    try:
-        with smtp_class(settings.smtp_host, settings.smtp_port, **kwargs) as server:
-            stage = "greeting"
-            server.ehlo()
-            if settings.smtp_use_tls:
-                stage = "starttls"
-                server.starttls(context=context)
-                stage = "post_tls_greeting"
-                server.ehlo()
-            if settings.smtp_use_credentials:
-                if not (settings.smtp_username or "").strip():
-                    return {"ok": False, "stage": "configuration", "reason": "smtp_username_missing"}
-                if not (settings.smtp_password or "").strip():
-                    return {"ok": False, "stage": "configuration", "reason": "smtp_password_missing"}
-                stage = "authentication"
-                server.login(settings.smtp_username, settings.smtp_password or "")
-        return {"ok": True, "stage": "authenticated", "tls": bool(settings.smtp_use_tls or settings.smtp_use_ssl)}
-    except smtplib.SMTPAuthenticationError:
-        return {"ok": False, "stage": "authentication", "reason": "smtp_authentication_failed"}
-    except TimeoutError:
-        return {"ok": False, "stage": stage, "reason": "smtp_timeout"}
-    except (smtplib.SMTPException, OSError) as exc:
-        return {"ok": False, "stage": stage, "reason": type(exc).__name__}
+    """Backward-compatible readiness entry point for the selected email provider."""
+    return check_email_readiness()
 
 
 def send_welcome_email(
@@ -114,51 +78,21 @@ def send_welcome_email(
     if (logo_primary_uri or "").strip():
         body = f"{body}\nBrand logo: {logo_primary_uri.strip()}\n"
 
-    if not settings.smtp_host:
-        return {"sent": False, "reason": "smtp_not_configured", "subject": subject, "preview": body[:500]}
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = settings.smtp_from_email
-    msg["To"] = email
-    msg.set_content(body)
-    msg.add_alternative(
-        _welcome_html(
+    html_body = _welcome_html(
             brand=brand,
             tenant_name=tenant_name,
             portal_url=portal_url,
             username=username,
             password_line=password_line,
             support=support,
-        ),
-        subtype="html",
-    )
-
-    tls_context = ssl.create_default_context()
-    if not settings.smtp_validate_certs:
-        tls_context.check_hostname = False
-        tls_context.verify_mode = ssl.CERT_NONE
-    smtp_class = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
-    smtp_kwargs = {"timeout": 20}
-    if settings.smtp_use_ssl:
-        smtp_kwargs["context"] = tls_context
+        )
     attempts = max(1, int(settings.enrollment_email_max_attempts))
     for attempt in range(1, attempts + 1):
         try:
-            with smtp_class(settings.smtp_host, settings.smtp_port, **smtp_kwargs) as server:
-                server.ehlo()
-                if settings.smtp_use_tls:
-                    server.starttls(context=tls_context)
-                    server.ehlo()
-                if settings.smtp_use_credentials and (settings.smtp_username or "").strip():
-                    server.login(settings.smtp_username, settings.smtp_password or "")
-                refused = server.send_message(msg)
-                if refused:
-                    raise smtplib.SMTPRecipientsRefused(refused)
+            result = send_email(to_email=email, subject=subject, text_body=body, html_body=html_body)
             break
-        except (smtplib.SMTPException, OSError):
+        except Exception:
             if attempt >= attempts:
                 raise
             time.sleep(min(30, settings.enrollment_email_retry_base_seconds * (2 ** (attempt - 1))))
-
-    return {"sent": True, "provider": "smtp", "attempts": attempt}
+    return {**result, "attempts": attempt}

@@ -42,6 +42,18 @@ services:
         value: render-bootstrap-admin
       - key: KC_BOOTSTRAP_ADMIN_PASSWORD
         generateValue: true
+      # Keycloak action emails (password reset, verification, first access)
+      # use the bundled HTTPS EmailSenderProvider on Render free.
+      - key: KC_SPI_EMAIL_SENDER__PROVIDER
+        value: https
+      - key: EMAIL_HTTP_PROVIDER
+        value: resend
+      - key: EMAIL_HTTP_API_URL
+        value: https://api.resend.com/emails
+      - key: EMAIL_HTTP_API_KEY
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
       - key: KC_PROXY_HEADERS
         value: xforwarded
       - key: KC_HOSTNAME_STRICT
@@ -213,6 +225,44 @@ services:
         value: optional
       - key: BOOTSTRAP_ADMIN_ENABLED
         value: "false"
+      # HRIS-owned welcome and recovery emails use HTTPS because Render free
+      # blocks outbound SMTP ports 25, 465, and 587.
+      - key: MAIL_PROVIDER
+        value: https
+      - key: EMAIL_HTTP_PROVIDER
+        value: resend
+      - key: EMAIL_HTTP_API_URL
+        value: https://api.resend.com/emails
+      - key: EMAIL_HTTP_API_KEY
+        fromService:
+          name: gi-kace-hris-keycloak-test
+          type: web
+          envVarKey: EMAIL_HTTP_API_KEY
+      - key: EMAIL_HTTP_TIMEOUT_SECONDS
+        value: "20"
+      - key: SMTP_FROM_EMAIL
+        fromService:
+          name: gi-kace-hris-keycloak-test
+          type: web
+          envVarKey: SMTP_FROM_EMAIL
+      - key: KEYCLOAK_MANAGE_REALM_EMAIL_SETTINGS
+        value: "false"
+      - key: KEYCLOAK_EMAIL_THEME
+        value: hris-platform
+      - key: ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL
+        value: "true"
+      - key: INVITATION_DISPATCH_WORKER_ENABLED
+        value: "true"
+      - key: ONBOARDING_WELCOME_EMAIL_ENABLED
+        value: "true"
+      - key: ONBOARDING_SEND_TEMP_PASSWORD_EMAIL
+        value: "false"
+      - key: POST_DEPLOY_WELCOME_EMAILS_ENABLED
+        value: "false"
+      - key: TENANT_BRAND_NAME_DEFAULT
+        value: GI-KACE HRIS
+      - key: TENANT_SUPPORT_EMAIL_DEFAULT
+        value: support@gi-kace.com.gh
 
   - type: web
     name: gi-kace-hris-portal-test

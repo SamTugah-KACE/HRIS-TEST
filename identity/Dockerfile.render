@@ -1,4 +1,18 @@
+FROM maven:3.9-eclipse-temurin-21 AS email-provider-build
+
+WORKDIR /build
+COPY providers/http-email/pom.xml ./pom.xml
+COPY providers/http-email/src ./src
+RUN mvn --batch-mode --no-transfer-progress package -DskipTests
+
+FROM quay.io/keycloak/keycloak:26.3.3 AS keycloak-build
+
+COPY --from=email-provider-build /build/target/keycloak-http-email-provider-1.0.0.jar /opt/keycloak/providers/keycloak-http-email-provider.jar
+RUN /opt/keycloak/bin/kc.sh build
+
 FROM quay.io/keycloak/keycloak:26.3.3
+
+COPY --from=keycloak-build /opt/keycloak/ /opt/keycloak/
 
 COPY realm-export.json /opt/keycloak/data/import/hris-platform-realm.json
 COPY themes/hris-platform /opt/keycloak/themes/hris-platform

@@ -324,6 +324,10 @@ class Settings(BaseSettings):
     onboarding_welcome_email_enabled: bool = Field(False, alias="ONBOARDING_WELCOME_EMAIL_ENABLED")
     onboarding_welcome_max_users_per_tenant: int = Field(2000, alias="ONBOARDING_WELCOME_MAX_USERS_PER_TENANT")
     mail_provider: str = Field("smtp", validation_alias=AliasChoices("PROVIDER", "MAIL_PROVIDER"))
+    email_http_provider: str = Field("resend", alias="EMAIL_HTTP_PROVIDER")
+    email_http_api_url: str = Field("https://api.resend.com/emails", alias="EMAIL_HTTP_API_URL")
+    email_http_api_key: Optional[str] = Field(None, alias="EMAIL_HTTP_API_KEY")
+    email_http_timeout_seconds: int = Field(20, alias="EMAIL_HTTP_TIMEOUT_SECONDS")
     smtp_host: Optional[str] = Field(None, validation_alias=AliasChoices("SMTP_HOST", "MAIL_SERVER"))
     smtp_port: int = Field(587, validation_alias=AliasChoices("SMTP_PORT", "MAIL_PORT"))
     smtp_username: Optional[str] = Field(None, validation_alias=AliasChoices("SMTP_USERNAME", "MAIL_USERNAME"))
@@ -504,8 +508,17 @@ class Settings(BaseSettings):
             raise ValueError("AUTH_STATE_TTL_SECONDS must be greater than 0")
         if self.smtp_use_tls and self.smtp_use_ssl:
             raise ValueError("SMTP_USE_TLS and SMTP_USE_SSL cannot both be true")
-        if self.mail_provider.strip().lower() != "smtp":
-            raise ValueError("Only PROVIDER=smtp is currently supported")
+        if self.mail_provider.strip().lower() not in {"smtp", "https"}:
+            raise ValueError("MAIL_PROVIDER/PROVIDER must be smtp or https")
+        if self.mail_provider.strip().lower() == "https":
+            if self.email_http_provider.strip().lower() != "resend":
+                raise ValueError("EMAIL_HTTP_PROVIDER must be resend when MAIL_PROVIDER=https")
+            if not self.email_http_api_url.strip().lower().startswith("https://"):
+                raise ValueError("EMAIL_HTTP_API_URL must use HTTPS")
+            if not (self.email_http_api_key or "").strip():
+                raise ValueError("EMAIL_HTTP_API_KEY is required when MAIL_PROVIDER=https")
+        if self.email_http_timeout_seconds <= 0:
+            raise ValueError("EMAIL_HTTP_TIMEOUT_SECONDS must be greater than 0")
         if self.password_reset_action_lifespan_seconds < 300:
             raise ValueError("PASSWORD_RESET_ACTION_LIFESPAN_SECONDS must be at least 300")
         enrollment_mode = self.startup_federated_enrollment_mode.strip().lower()

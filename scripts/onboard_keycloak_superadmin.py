@@ -1168,6 +1168,8 @@ def main() -> None:
             "operator_groups_sample": operator_groups[:20],
             "os_identity": verified_identity.principal,
             "request_id": secrets.token_hex(8),
+            "email_sent": False,
+            "sign_in_instruction": "Sign in with the permanent password entered in this terminal; this command does not send email.",
         }
         if audit_enabled:
             try:

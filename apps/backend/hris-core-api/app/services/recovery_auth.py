@@ -5,12 +5,9 @@ import hashlib
 import hmac
 import json
 import secrets
-import smtplib
-import ssl
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from typing import Any, Dict, Iterable, Optional
 
 import httpx
@@ -21,6 +18,7 @@ from app.services import automation_store
 from app.services.capability_registry import resolve_capability
 from app.services.providers.arkesel import ArkeselVerificationProvider
 from app.services.provider_config_service import build_tenant_sms_provider
+from app.services.email_delivery import send_email
 
 
 RECOVERY_COOKIE_NAME = "hris_recovery_session"
@@ -129,30 +127,14 @@ def recovery_available() -> bool:
 
 
 def _send_email_code(destination: str, code: str) -> bool:
-    settings = get_settings()
-    if not settings.smtp_host:
-        return False
-    message = EmailMessage()
-    message["Subject"] = "Your HRIS recovery code"
-    message["From"] = settings.smtp_from_email
-    message["To"] = destination
-    message.set_content(f"Your HRIS recovery code is {code}. It expires shortly. Do not share this code.")
-    context = ssl.create_default_context()
-    smtp_class = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
-    kwargs: Dict[str, Any] = {"timeout": 10}
-    if settings.smtp_use_ssl:
-        kwargs["context"] = context
     try:
-        with smtp_class(settings.smtp_host, settings.smtp_port, **kwargs) as server:
-            server.ehlo()
-            if settings.smtp_use_tls:
-                server.starttls(context=context)
-                server.ehlo()
-            if settings.smtp_use_credentials:
-                server.login(settings.smtp_username or "", settings.smtp_password or "")
-            server.send_message(message)
+        send_email(
+            to_email=destination,
+            subject="Your HRIS recovery code",
+            text_body=f"Your HRIS recovery code is {code}. It expires shortly. Do not share this code.",
+        )
         return True
-    except (OSError, smtplib.SMTPException):
+    except Exception:
         return False
 
 
