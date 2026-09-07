@@ -29,6 +29,7 @@ from app.api.platform_foundation import router as platform_foundation_router
 from app.api.auth_recovery import router as auth_recovery_router
 from app.core.auth import AuthenticatedUser
 from app.core.settings import get_settings
+from app.core.swagger_docs import swagger_response
 from app.core.logging_config import configure_logging
 from app.services.admin_bootstrap import bootstrap_admin_accounts_if_enabled
 from app.services.auto_sync_service import start_auto_sync_loop_if_enabled
@@ -51,10 +52,21 @@ allowed_origins = [origin.strip() for origin in settings.cors_allowed_origins.sp
 logger = logging.getLogger("hris_core.access")
 
 app = FastAPI(
+    docs_url=None,
     title="HRIS Core API",
     version="1.0.0",
     description="Integration layer aggregating SRMS, eAppraisal, and eLeave for the HRIS Portal",
 )
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_docs(request: Request):
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    return swagger_response(
+        openapi_url=f"{root_path}{app.openapi_url}",
+        csrf_cookie=settings.auth_csrf_cookie_name,
+        csrf_header=settings.auth_csrf_header_name,
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,7 +107,8 @@ async def attach_correlation_id(request: Request, call_next):
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+    if request.url.path != "/docs" or "Content-Security-Policy" not in response.headers:
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
     if settings.app_env.strip().lower() == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     duration_ms = round((time.perf_counter() - start) * 1000, 2)
