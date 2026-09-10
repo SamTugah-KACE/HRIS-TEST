@@ -559,7 +559,7 @@ export const getModuleReadinessSnapshot = async (params?: {
   username?: string;
   employee_id?: string;
 }): Promise<ModuleReadinessSnapshotResponse> => {
-  const r = await httpClient.get<ModuleReadinessSnapshotResponse>('/debug/integrations/module-readiness', { params });
+  const r = await httpClient.get<ModuleReadinessSnapshotResponse>('/admin/integrations/module-readiness', { params });
   return r.data;
 };
 
@@ -568,7 +568,7 @@ export const getJitAuditSnapshot = async (params?: {
   module_name?: string;
   limit?: number;
 }): Promise<JitAuditSnapshotResponse> => {
-  const r = await httpClient.get<JitAuditSnapshotResponse>('/debug/integrations/jit/audit', { params });
+  const r = await httpClient.get<JitAuditSnapshotResponse>('/admin/integrations/jit/audit', { params });
   return r.data;
 };
 

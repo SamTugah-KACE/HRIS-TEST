@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Building2, Upload, CheckCircle, XCircle, Eye, EyeOff, Copy, Check, Rocket, AlertTriangle, Compass } from 'lucide-react';
 import { clsx } from 'clsx';
 import {
@@ -102,6 +102,19 @@ export const TenantManagementPage: React.FC = () => {
   const [claimError, setClaimError] = useState('');
   const [openClaims, setOpenClaims] = useState<TenantLinkClaim[]>([]);
   const [showGuide, setShowGuide] = useState(true);
+  const selectionVersion = useRef(0);
+  useEffect(() => {
+    selectionVersion.current += 1;
+    setFederatedResult(null);
+    setReadinessResult(null);
+    setJitAuditResult(null);
+    setResetResult(null);
+    setFederatedError('');
+    setReadinessError('');
+    setJitAuditError('');
+    setMessage('');
+    setFederatedApplyConfirmation('');
+  }, [selectedTenantId, federatedGlobalScope]);
 
   const selectedTenant = useMemo(
     () => tenants.find((t) => t.tenant_id === selectedTenantId) || null,
@@ -297,6 +310,8 @@ export const TenantManagementPage: React.FC = () => {
       };
       const response = await importTenantOnboarding(cleaned);
       setOnboardResult(response);
+      setOnboardPayload((previous) => ({ ...previous, tenant_id: response.tenant_id }));
+      setSelectedTenantId(response.tenant_id);
       // Refresh list so the new/updated tenant is visible immediately.
       const refreshed = await listTenants(500);
       setTenants(refreshed.tenants || []);
@@ -449,6 +464,7 @@ export const TenantManagementPage: React.FC = () => {
   };
 
   const onRunFederatedSync = async () => {
+    const version = selectionVersion.current;
     if (!federatedDryRun && federatedApplyConfirmation.trim().toUpperCase() !== 'APPLY') {
       setFederatedError('Type APPLY to confirm non-dry-run sync.');
       return;
@@ -462,6 +478,7 @@ export const TenantManagementPage: React.FC = () => {
         dry_run: federatedDryRun,
         max_users: Math.max(1, Number(federatedMaxUsers) || 1),
       });
+      if (version !== selectionVersion.current) return;
       setFederatedResult(payload);
       setMessage(
         federatedDryRun
@@ -491,6 +508,7 @@ export const TenantManagementPage: React.FC = () => {
   };
 
   const onRunModuleReadiness = async () => {
+    const version = selectionVersion.current;
     setReadinessBusy(true);
     setReadinessError('');
     setReadinessResult(null);
@@ -501,7 +519,7 @@ export const TenantManagementPage: React.FC = () => {
         username: readinessUsername.trim() || undefined,
         employee_id: readinessEmployeeId.trim() || undefined,
       });
-      setReadinessResult(payload);
+      if (version === selectionVersion.current) setReadinessResult(payload);
     } catch (err: unknown) {
       const maybeAxios = err as { response?: { data?: { detail?: string } }; message?: string };
       setReadinessError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Could not check the connected HR services.');
@@ -511,6 +529,7 @@ export const TenantManagementPage: React.FC = () => {
   };
 
   const onRunJitAudit = async () => {
+    const version = selectionVersion.current;
     setJitAuditBusy(true);
     setJitAuditError('');
     setJitAuditResult(null);
@@ -520,7 +539,7 @@ export const TenantManagementPage: React.FC = () => {
         module_name: jitAuditModule.trim() || undefined,
         limit: 50,
       });
-      setJitAuditResult(payload);
+      if (version === selectionVersion.current) setJitAuditResult(payload);
     } catch (err: unknown) {
       const maybeAxios = err as { response?: { data?: { detail?: string } }; message?: string };
       setJitAuditError(maybeAxios?.response?.data?.detail || maybeAxios?.message || 'Could not load the automatic setup history.');
@@ -554,7 +573,7 @@ export const TenantManagementPage: React.FC = () => {
               {[
                 ['1', 'Choose the path', 'New customer: create it below. Existing customer: find it in connected systems.'],
                 ['2', 'Connect services', 'Select Staff Records, Appraisal, and other services the organization is entitled to use.'],
-                ['3', 'Verify the link', 'For existing data, complete native-system confirmation and independent administrator approval.'],
+                ['3', 'Verify the link', 'An authorized native representative confirms the link; an HRIS administrator then approves it under the configured approval policy.'],
                 ['4', 'Preview, then activate', 'Run employee sign-in setup as a dry run, review readiness, then apply and test one user.'],
               ].map(([number, title, detail]) => (
                 <li key={number} className="border-brand-100 p-4 md:border-r last:border-r-0">
@@ -571,7 +590,7 @@ export const TenantManagementPage: React.FC = () => {
           <div>
             <h2 className="text-sm font-semibold text-gray-900">Connect an existing organization</h2>
             <p className="mt-1 text-xs text-gray-500">
-              Use this when an organization already exists in Staff Records or Performance Appraisal. For safety, the organization must confirm the request and another system administrator must approve it.
+              Use this when an organization already exists in Staff Records or Performance Appraisal. An authorized native representative must confirm the exact organization. HRIS approval then follows your configured policy; a second HRIS administrator is required only when separation of duties is enabled.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">

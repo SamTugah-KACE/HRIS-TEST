@@ -18,7 +18,13 @@ from app.services.welcome_email_service import check_smtp_readiness
 from app.services.tenant_registry_client import get_tenant_mapping
 
 router = APIRouter(prefix="/debug/integrations", tags=["integration-debug"])
+admin_router = APIRouter(prefix="/admin/integrations", tags=["integration-administration"])
 logger = logging.getLogger(__name__)
+
+
+def require_debug_enabled():
+    if not get_settings().enable_integration_debug_endpoints:
+        raise HTTPException(status_code=404, detail="Debug integration endpoints are disabled")
 
 
 @router.get("/email-delivery-audit")
@@ -335,7 +341,8 @@ def get_integrations_readiness(
     }
 
 
-@router.get("/module-readiness")
+@admin_router.get("/module-readiness")
+@router.get("/module-readiness", dependencies=[Depends(require_debug_enabled)])
 def get_module_readiness_snapshot(
     request: Request,
     tenant_id: Optional[str] = None,
@@ -344,12 +351,6 @@ def get_module_readiness_snapshot(
     employee_id: Optional[str] = None,
     user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
 ):
-    settings = get_settings()
-    if not settings.enable_integration_debug_endpoints:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Debug integration endpoints are disabled",
-        )
     target_tenant = str(tenant_id or user.tenant_id or "").strip()
     if not target_tenant:
         raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -439,7 +440,8 @@ def run_federated_directory_keycloak_sync(
     )
 
 
-@router.get("/jit/audit")
+@admin_router.get("/jit/audit")
+@router.get("/jit/audit", dependencies=[Depends(require_debug_enabled)])
 def get_jit_audit_history(
     request: Request,
     tenant_id: Optional[str] = None,
@@ -447,12 +449,6 @@ def get_jit_audit_history(
     limit: int = 50,
     user: AuthenticatedUser = Depends(require_roles("hris:super_admin")),
 ):
-    settings = get_settings()
-    if not settings.enable_integration_debug_endpoints:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Debug integration endpoints are disabled",
-        )
     target_tenant = str(tenant_id or user.tenant_id or "").strip()
     if not target_tenant:
         raise HTTPException(status_code=400, detail="tenant_id is required")

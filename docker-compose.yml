@@ -151,13 +151,13 @@ x-hris-core-api-env: &hris_core_api_env
   # Purpose: Secret/configuration for federated keycloak allow existing user password reset; inject securely and never commit a real value.
   FEDERATED_KEYCLOAK_ALLOW_EXISTING_USER_PASSWORD_RESET: ${HRIS_FEDERATED_KEYCLOAK_ALLOW_EXISTING_USER_PASSWORD_RESET:-false}
   # Purpose: Network location used for automation store database url.
-  AUTOMATION_STORE_DATABASE_URL: ${HRIS_AUTOMATION_STORE_DATABASE_URL:-postgresql://hris:password@postgres:5432/hris_tenant_registry}
+  AUTOMATION_STORE_DATABASE_URL: ${HRIS_AUTOMATION_STORE_DATABASE_URL:-postgresql://hris:hris_secret@postgres:5432/hris_tenant_registry}
   # Purpose: Configures automation store schema.
   AUTOMATION_STORE_SCHEMA: ${HRIS_AUTOMATION_STORE_SCHEMA:-hris_automation}
   # Purpose: Configures db auto create on startup.
   DB_AUTO_CREATE_ON_STARTUP: ${HRIS_DB_AUTO_CREATE_ON_STARTUP:-true}
   # Purpose: Network location used for db bootstrap admin url.
-  DB_BOOTSTRAP_ADMIN_URL: ${HRIS_DB_BOOTSTRAP_ADMIN_URL:-postgresql://hris:password@postgres:5432/postgres}
+  DB_BOOTSTRAP_ADMIN_URL: ${HRIS_DB_BOOTSTRAP_ADMIN_URL:-postgresql://hris:hris_secret@postgres:5432/postgres}
   # Purpose: Configures db bootstrap admin database.
   DB_BOOTSTRAP_ADMIN_DATABASE: ${HRIS_DB_BOOTSTRAP_ADMIN_DATABASE:-postgres}
   # Purpose: Numeric runtime limit for db bootstrap connect retries.

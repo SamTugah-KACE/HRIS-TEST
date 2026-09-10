@@ -19,6 +19,7 @@ from app.api.dashboard import router as dashboard_router
 from app.api.employees import router as employees_router
 from app.api.federated_directory_debug import router as federated_directory_debug_router
 from app.api.integrations_debug import router as integrations_debug_router
+from app.api.integrations_debug import admin_router as integrations_admin_router
 from app.api.integration_sync import router as integration_sync_router
 from app.api.jit_setup import router as jit_setup_router
 from app.api.me import router as me_router
@@ -361,7 +362,7 @@ def _wait_for_tenant_registry_if_needed() -> None:
                 last_error = exc
                 if _tcp_reachable(probe_url):
                     logger.warning(
-                        "Tenant Registry HTTP health probe failed but TCP is reachable; continuing startup: %s",
+                        "Tenant Registry HTTP health probe failed despite TCP reachability; retrying: %s",
                         json.dumps(
                             {
                                 "health_url": probe_url,
@@ -373,8 +374,6 @@ def _wait_for_tenant_registry_if_needed() -> None:
                             ensure_ascii=True,
                         ),
                     )
-                    readiness_confirmed = True
-                    break
         if readiness_confirmed:
             return
         else:
@@ -484,6 +483,7 @@ app.include_router(modules_router)
 app.include_router(tenants_router)
 app.include_router(tenant_federation_router)
 app.include_router(integrations_debug_router)
+app.include_router(integrations_admin_router)
 app.include_router(federated_directory_debug_router)
 app.include_router(integration_sync_router)
 app.include_router(jit_setup_router)

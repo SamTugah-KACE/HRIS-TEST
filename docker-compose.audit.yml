@@ -1,0 +1,20 @@
+# Explicit, bounded local testing: no automatic production enrollment/sync.
+# docker compose -f docker-compose.yml -f docker-compose.audit.yml up -d --build
+services:
+  hris-core-api:
+    environment:
+      AUTOMATION_STORE_DATABASE_URL: postgresql://hris:hris_secret@postgres:5432/hris_tenant_registry
+      DB_BOOTSTRAP_ADMIN_URL: postgresql://hris:hris_secret@postgres:5432/postgres
+      ENABLE_AUTO_SYNC_LOOP: "false"
+      ENABLE_STARTUP_TENANT_INVENTORY_IMPORT: "false"
+      STARTUP_FEDERATED_ENROLLMENT_MODE: "disabled"
+      ENABLE_POST_DEPLOY_SYNC_AUTOMATION: "false"
+      ENABLE_AUTO_PROVISION: "false"
+      ENROLLMENT_WORKER_ENABLED: "false"
+      INVITATION_DISPATCH_WORKER_ENABLED: "false"
+      POST_DEPLOY_WELCOME_EMAILS_ENABLED: "false"
+      EMAIL_TEST_LOG_CONTENTS: "false"
+  portal:
+    build:
+      args:
+        VITE_AUTH_MODE: keycloak

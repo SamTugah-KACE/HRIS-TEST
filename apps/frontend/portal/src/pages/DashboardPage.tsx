@@ -334,7 +334,7 @@ export const DashboardPage: React.FC = () => {
             <div>
               <div>
                 <h3 className="text-sm font-semibold text-gray-900">Organizations registered with HRIS</h3>
-                <p className="mt-1 text-xs text-gray-500" title="This list combines approved organizations from Staff Records, Performance Appraisal and other connected HR services.">Approved organizations available across the connected HR services.</p>
+                <p className="mt-1 text-xs text-gray-500">HRIS organization records. Active status does not mean module setup or federation is complete.</p>
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs text-gray-600">

@@ -118,6 +118,10 @@ def import_tenant_onboarding(
         body["tenant_id"] = str(canonical.tenant_id)
         body["code"] = canonical.code
         body["name"] = canonical.name
+        body["is_active"] = canonical.is_active
+        # Existing verified routing belongs to the registry, not the retry form.
+        for field in ("srms_schema", "srms_slug", "eappraisal_subdomain", "eleave_subdomain"):
+            body[field] = getattr(canonical, field, None)
     else:
         incoming_code = str(payload.code or "").strip().casefold()
         incoming_name = str(payload.name or "").strip().casefold()
@@ -143,13 +147,20 @@ def import_tenant_onboarding(
     subscription_plan = str(body.pop("subscription_plan", "Basic") or "Basic").strip()
     module_results: Dict[str, Any] = {}
     # Routing metadata is generated only by a native module provisioning result.
-    body["eappraisal_subdomain"] = None
-    body["eleave_subdomain"] = None
+    if not payload.tenant_id:
+        for field in ("srms_schema", "srms_slug", "eappraisal_subdomain", "eleave_subdomain"):
+            body[field] = None
 
     if enabled_modules & {"srms", "eappraisal"} and not admin_email:
         raise HTTPException(status_code=422, detail="primary_admin_email is required for native module provisioning")
     if "srms" in enabled_modules and not phone_number:
         raise HTTPException(status_code=422, detail="phone_number is required when provisioning Staff Records")
+    if enabled_modules and not body["is_active"]:
+        raise HTTPException(status_code=409, detail="An inactive organization cannot provision native workspaces")
+
+    # Reserve durable identity BEFORE any native side effect. A registry outage
+    # must never create an organization that HRIS cannot subsequently identify.
+    import_tenant(body)
 
     if "srms" in enabled_modules:
         try:
