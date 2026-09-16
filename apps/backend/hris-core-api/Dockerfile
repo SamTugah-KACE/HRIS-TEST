@@ -17,6 +17,7 @@ COPY app ./app
 EXPOSE 8000
 
 RUN useradd -m hriscore
+RUN mkdir -p /app/data /app/logs && chown -R hriscore:hriscore /app/data /app/logs
 USER hriscore
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,54 @@
+{
+    email {$ACME_EMAIL}
+    admin off
+}
+
+(upstream_headers) {
+    header_up -Forwarded
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Port 443
+    header_up -X-Forwarded-Prefix
+    header_up -X-Real-IP
+}
+
+{$AZURE_HOSTNAME} {
+    # No access log: callback URLs contain single-use authorization codes.
+    header Referrer-Policy no-referrer
+    header X-Content-Type-Options nosniff
+
+    @restricted {
+        path /identity/admin /identity/admin/* /identity/realms/master /identity/realms/master/*
+        not remote_ip {$AZURE_ADMIN_CIDR}
+    }
+    handle @restricted {
+        respond "Administration access is restricted" 403
+    }
+    redir /identity /identity/ 308
+    handle /identity/* {
+        reverse_proxy keycloak:8080 {
+            import upstream_headers
+        }
+    }
+    redir /api /api/ 308
+    handle_path /api/* {
+        reverse_proxy hris-core-api:8000 {
+            import upstream_headers
+        }
+    }
+    handle {
+        reverse_proxy portal:80
+    }
+}
+
+# Local Azure application probe. Host port is bound to loopback in Compose.
+# This checks Core liveness, NOT complete federation/dependency readiness.
+http://:8090 {
+    handle /health {
+        reverse_proxy hris-core-api:8000
+    }
+    handle {
+        respond 404
+    }
+}

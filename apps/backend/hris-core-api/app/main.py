@@ -108,7 +108,10 @@ async def attach_correlation_id(request: Request, call_next):
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    if request.url.path != "/docs" or "Content-Security-Policy" not in response.headers:
+    # A reverse proxy may mount this app under /api. Preserve Swagger's nonce
+    # policy for that route too; comparing the external URL with /docs breaks it.
+    is_swagger = request.scope.get("endpoint") is swagger_docs
+    if not is_swagger or "Content-Security-Policy" not in response.headers:
         response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
     if settings.app_env.strip().lower() == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"

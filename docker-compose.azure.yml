@@ -1,0 +1,248 @@
+# Standalone file. Do NOT combine with docker-compose.yml (development defaults).
+# Generated secrets: python3 deploy/azure/setup.py
+# All invocations: docker compose --env-file .env.azure.local -f docker-compose.azure.yml ...
+name: hris-azure-test
+
+x-runtime: &runtime
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-core-env: &core-env
+  APP_ENV: production
+  AUTH_MODE: keycloak
+  HRIS_DATA_SOURCE_MODE: production
+  USE_STUB_DATA: "false"
+  ALLOW_LOW_CONFIDENCE_IDENTITY_FALLBACK: "false"
+  HRIS_DEPLOYMENT_MODE: single
+  HRIS_ALLOW_SINGLE_NODE_PRODUCTION: "true"
+  HRIS_COMPONENT_SRMS_MODE: disabled
+  HRIS_COMPONENT_EAPPRAISAL_MODE: disabled
+  HRIS_COMPONENT_ELEAVE_MODE: disabled
+  HRIS_COMPONENT_REDIS_MODE: disabled
+  HRIS_COMPONENT_BACKGROUND_WORKERS_MODE: disabled
+  HRIS_COMPONENT_SCHEDULER_MODE: disabled
+  HRIS_COMPONENT_EMAIL_MODE: optional
+  HRIS_AUTH_RECOVERY_MODE: disabled
+  HRIS_TRUSTED_HOSTNAMES: ${AZURE_HOSTNAME:?Run setup.py},localhost,127.0.0.1,hris-core-api
+  HRIS_PLATFORM_BASE_DOMAIN: ${AZURE_HOSTNAME}
+  PORTAL_BASE_URL: https://${AZURE_HOSTNAME}
+  CORS_ALLOWED_ORIGINS: https://${AZURE_HOSTNAME}
+  AUTH_SSO_CALLBACK_URL: https://${AZURE_HOSTNAME}/api/auth/sso/callback
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: lax
+  AUTH_CSRF_ENABLED: "true"
+  AUTH_STATE_SECRET: ${AUTH_STATE_SECRET:?Run setup.py}
+  AUTH_SESSION_ENCRYPTION_KEY: ${AUTH_SESSION_ENCRYPTION_KEY:?Run setup.py}
+  PROVIDER_SECRET_ENCRYPTION_KEY: ${PROVIDER_SECRET_ENCRYPTION_KEY:?Run setup.py}
+  KEYCLOAK_ISSUER: https://${AZURE_HOSTNAME}/identity/realms/hris-platform
+  KEYCLOAK_INTERNAL_BASE_URL: http://keycloak:8080/identity
+  # Explicit token URL avoids duplicating /identity in legacy URL resolution.
+  KEYCLOAK_TOKEN_URL: http://keycloak:8080/identity/realms/hris-platform/protocol/openid-connect/token
+  KEYCLOAK_JWKS_URL: http://keycloak:8080/identity/realms/hris-platform/protocol/openid-connect/certs
+  KEYCLOAK_END_SESSION_URL: https://${AZURE_HOSTNAME}/identity/realms/hris-platform/protocol/openid-connect/logout
+  KEYCLOAK_HEALTH_URLS: http://keycloak:9000/health/ready
+  KEYCLOAK_AUDIENCE_HRIS_CORE: hris-core-api
+  KEYCLOAK_CLIENT_ID_PORTAL: hris-portal
+  KEYCLOAK_CLIENT_SECRET_PORTAL: ${HRIS_KC_PORTAL_SECRET:?Run setup.py}
+  KEYCLOAK_REALM: hris-platform
+  KEYCLOAK_ADMIN_REALM: hris-platform
+  KEYCLOAK_ADMIN_CLIENT_ID: hris-core-admin
+  KEYCLOAK_ADMIN_CLIENT_SECRET: ${HRIS_KC_SERVICE_SECRET:?Run setup.py}
+  KEYCLOAK_MANAGE_PORTAL_CLIENT_SETTINGS: "false"
+  KEYCLOAK_MANAGE_REALM_EMAIL_SETTINGS: "false"
+  KEYCLOAK_EMAIL_THEME: hris-platform
+  TENANT_REGISTRY_BASE_URL: http://tenant-registry:8000
+  TENANT_REGISTRY_BASIC_AUTH_USERNAME: hris_internal
+  TENANT_REGISTRY_BASIC_AUTH_PASSWORD: ${REGISTRY_PASSWORD:?Run setup.py}
+  TENANT_REGISTRY_ALLOW_FALLBACK: "false"
+  TENANT_REGISTRY_STARTUP_WAIT_FAIL_OPEN: "false"
+  AUTOMATION_STORE_DATABASE_URL: postgresql://hris:${POSTGRES_PASSWORD:?Run setup.py}@postgres:5432/hris_tenant_registry
+  AUTOMATION_STORE_SCHEMA: hris_automation
+  DB_AUTO_CREATE_ON_STARTUP: "false"
+  DB_BOOTSTRAP_ADMIN_URL: postgresql://hris:${POSTGRES_PASSWORD}@postgres:5432/postgres
+  STORAGE_PROVIDER_STACK: local
+  MEDIA_LOCAL_BASE_PATH: /app/data/media
+  BOOTSTRAP_ADMIN_ENABLED: "false"
+  ENABLE_STARTUP_TENANT_INVENTORY_IMPORT: "false"
+  TENANT_INVENTORY_AUTO_CREATE_CANONICAL: "false"
+  ENABLE_AUTO_SYNC_LOOP: "false"
+  ENABLE_POST_DEPLOY_SYNC_AUTOMATION: "false"
+  ENABLE_AUTO_PROVISION: "false"
+  ENABLE_JIT_MODULE_SETUP: "false"
+  JIT_AUTO_BOOTSTRAP_ENABLED: "false"
+  STARTUP_FEDERATED_ENROLLMENT_MODE: disabled
+  ENABLE_FEDERATED_KEYCLOAK_SYNC: "false"
+  ENABLE_FEDERATED_KEYCLOAK_WELCOME_EMAIL: "false"
+  ENROLLMENT_WORKER_ENABLED: "false"
+  INVITATION_DISPATCH_WORKER_ENABLED: "false"
+  ONBOARDING_AUTO_SYNC_NEW_TENANTS: "false"
+  ONBOARDING_AUTO_KEYCLOAK_PROVISION: "false"
+  ONBOARDING_WELCOME_EMAIL_ENABLED: "false"
+  POST_DEPLOY_WELCOME_EMAILS_ENABLED: "false"
+  MODULE_HANDOFF_ENABLED: "false"
+  ONBOARDING_SEND_TEMP_PASSWORD_EMAIL: "false"
+  ONBOARDING_DEV_CREDENTIALS_EXPORT_ENABLED: "false"
+  EXPOSE_TEMPORARY_PASSWORD_IN_API: "false"
+  EMAIL_TEST_LOG_CONTENTS: "false"
+  # Production URLs are required by current runtime validation even in this
+  # isolated first-boot phase. No native credentials are supplied to containers.
+  SRMS_BASE_URL: https://srms.gi-kace.com.gh
+  EAPPRAISAL_INTEGRATION_BASE_URL: https://appraisal.gi-kace.com.gh
+  SRMS_AUTO_SESSION_TOKEN: "false"
+  MAIL_PROVIDER: smtp
+  SMTP_HOST: smtp.gmail.com
+  SMTP_PORT: "587"
+  SMTP_USERNAME: ${SMTP_USERNAME:?Run setup.py}
+  SMTP_PASSWORD: ${CORE_SMTP_PASSWORD:?Run setup.py}
+  SMTP_FROM_EMAIL: ${SMTP_USERNAME}
+  SMTP_USE_TLS: "true"
+  SMTP_USE_SSL: "false"
+  SMTP_USE_CREDENTIALS: "true"
+  SMTP_VALIDATE_CERTS: "true"
+  TENANT_BRAND_NAME_DEFAULT: GI-KACE HRIS
+  TENANT_SUPPORT_EMAIL_DEFAULT: ${SMTP_USERNAME}
+
+services:
+  postgres:
+    <<: *runtime
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: hris
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hris_tenant_registry
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/db-init/00_keycloak_schema.sql:/docker-entrypoint-initdb.d/00_keycloak_schema.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U hris -d hris_tenant_registry"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  keycloak:
+    <<: *runtime
+    build:
+      context: ./identity
+      dockerfile: ../deploy/azure/keycloak.Dockerfile
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/hris_tenant_registry
+      KC_DB_SCHEMA: keycloak
+      KC_DB_USERNAME: hris
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: azure-bootstrap-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_PASSWORD:?Run setup.py}
+      KC_HOSTNAME: https://${AZURE_HOSTNAME}/identity
+      KC_HOSTNAME_STRICT: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /identity
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      KC_PROXY_HEADERS: xforwarded
+      KC_CACHE: local
+      HRIS_KC_PORTAL_SECRET: ${HRIS_KC_PORTAL_SECRET}
+      HRIS_KC_SERVICE_SECRET: ${HRIS_KC_SERVICE_SECRET}
+      HRIS_KC_SMTP_PASSWORD: ${KEYCLOAK_SMTP_PASSWORD:?Run setup.py}
+    volumes:
+      - ./.azure/realm.json:/opt/keycloak/data/import/hris-platform-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s
+      retries: 30
+
+  tenant-registry:
+    <<: *runtime
+    build: ./apps/backend/tenant-registry-service
+    environment:
+      DATABASE_URL: postgresql://hris:${POSTGRES_PASSWORD}@postgres:5432/hris_tenant_registry
+      INTERNAL_BASIC_AUTH_USERNAME: hris_internal
+      INTERNAL_BASIC_AUTH_PASSWORD: ${REGISTRY_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  hris-core-api:
+    <<: *runtime
+    build: ./apps/backend/hris-core-api
+    environment: *core-env
+    # Only Caddy and local containers can reach this unpublished port. Caddy
+    # replaces forwarded headers; do not publish 8000 or trust arbitrary proxies.
+    command: [uvicorn, app.main:app, --host, "0.0.0.0", --port, "8000", --root-path, /api, --proxy-headers, --forwarded-allow-ips, "*", --no-access-log]
+    volumes:
+      - coredata:/app/data
+      - corelogs:/app/logs
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      tenant-registry:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
+  portal:
+    <<: *runtime
+    build:
+      context: ./apps/frontend/portal
+      args:
+        VITE_HRIS_CORE_API_BASE_URL: https://${AZURE_HOSTNAME}/api
+        VITE_AUTH_MODE: keycloak
+    depends_on:
+      hris-core-api:
+        condition: service_healthy
+
+  proxy:
+    <<: *runtime
+    image: caddy:2.10-alpine
+    environment:
+      AZURE_HOSTNAME: ${AZURE_HOSTNAME}
+      AZURE_ADMIN_CIDR: ${AZURE_ADMIN_CIDR:?Run setup.py}
+      ACME_EMAIL: ${ACME_EMAIL:?Run setup.py}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./deploy/azure/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      portal:
+        condition: service_started
+
+  # Explicit one-shot operator action, never launched by normal `up`.
+  bootstrap-admin:
+    profiles: [tools]
+    build: ./apps/backend/hris-core-api
+    environment: *core-env
+    entrypoint: [python, /opt/azure/bootstrap_admin.py]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./deploy/azure/bootstrap_admin.py:/opt/azure/bootstrap_admin.py:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  coredata:
+  corelogs:
+  caddydata:
+  caddyconfig:

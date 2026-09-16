@@ -10,6 +10,7 @@ RUN npm ci --ignore-scripts || npm install
 
 COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY src ./src
+COPY hris_enterprise_primary_logo.png hris_enterprise_favicon.ico hris_enterprise_favicon_32.png ./
 
 RUN echo "VITE_HRIS_CORE_API_BASE_URL=$VITE_HRIS_CORE_API_BASE_URL" > .env.production \
  && echo "VITE_AUTH_MODE=$VITE_AUTH_MODE" >> .env.production
